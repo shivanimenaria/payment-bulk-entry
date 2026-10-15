@@ -1,0 +1,77 @@
+{
+  "count": 6,
+  "data": [
+    {
+      "payment_request_id": "mock-pr-101",
+      "status": "approved",
+      "request_amount": 30000,
+      "paid_amount": 0,
+      "payment_due": 30000,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-1"
+    },
+    {
+      "payment_request_id": "mock-pr-102",
+      "status": "partially_paid",
+      "request_amount": 80000,
+      "paid_amount": 30000,
+      "payment_due": 50000,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-2"
+    },
+    {
+      "payment_request_id": "mock-pr-103",
+      "status": "approved",
+      "request_amount": 40000,
+      "paid_amount": 0,
+      "payment_due": 40000,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-3"
+    },
+    {
+      "payment_request_id": "mock-pr-104",
+      "status": "partially_paid",
+      "request_amount": 60000,
+      "paid_amount": 15000,
+      "payment_due": 45000,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-4"
+    },
+    {
+      "payment_request_id": "mock-pr-105",
+      "status": "approved",
+      "request_amount": 35000,
+      "paid_amount": 0,
+      "payment_due": 35000,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-5"
+    },
+    {
+      "payment_request_id": "mock-pr-106",
+      "status": "paid",
+      "request_amount": 25000,
+      "paid_amount": 25000,
+      "payment_due": 0,
+      "currency": {
+        "code": "INR",
+        "symbol": "₹"
+      },
+      "project_id": "mock-project-1"
+    }
+  ]
+}

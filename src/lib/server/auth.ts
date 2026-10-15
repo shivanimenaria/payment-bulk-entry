@@ -6,7 +6,7 @@ import { cookies, headers } from "next/headers";
 import { EncryptJWT, jwtDecrypt, SignJWT, importPKCS8 } from "jose";
 import { decodeRdashIdSafe } from "./rdash-id";
 import { requireEnv } from "./env";
-import { getDataSource } from "./rdash-source";
+import { getDataSource } from "./rdash-source/mode";
 import { getCookieSecretKey } from "@/lib/runtime-config";
 
 const FRESH_HEADER = "x-pbe-auth-fresh";

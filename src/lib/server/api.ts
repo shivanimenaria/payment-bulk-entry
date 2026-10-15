@@ -248,6 +248,11 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
 //   { success, data: [...] }                 (flat)
 //   { success, data: { data: [...], ... } }  (nested, e.g. /v2/vendors)
 //
+// `opts.untilCount`: for paginated entities shaped `{ count, data: [...] }`
+// (e.g. the payment-request config). Pages until `count` items are collected,
+// advancing `offset` by the items actually received (robust to a server-side
+// limit cap). A missing `count`, an empty page before `count` is reached, or
+// running out of pages throws RdashResponseShapeError — never a partial list.
 // `opts.noRefresh`: on 401, throw AuthError instead of refreshing. Required
 // when `token` is NOT the request cookie's token (e.g. /api/session verifying
 // a just-issued handover token): refreshAuthForRequest refreshes whatever
@@ -255,9 +260,13 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
 export async function paginateRdash<T>(
   path: string,
   token: string,
-  opts?: { noRefresh?: boolean },
+  opts?: { noRefresh?: boolean; untilCount?: boolean },
 ): Promise<T[]> {
   const PAGE = 200;
+  // Hard cap on requests per call. Reaching it without a normal stop throws
+  // RdashResponseShapeError — never a silently truncated list.
+  const MAX_PAGES = 200;
+  let total: number | null = null;
   const out: T[] = [];
   // ID dedup across pages — see the "rDash ignores pagination" comment below.
   const seen = new Set<string>();
@@ -271,7 +280,7 @@ export async function paginateRdash<T>(
   // `currentToken` may be replaced after a successful refresh and is used
   // for all subsequent pages in the loop.
   let currentToken = token;
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < MAX_PAGES; i++) {
     const url = `${requireEnv("RDASH_API_URL")}${path}${sep}limit=${PAGE}&offset=${offset}`;
     let res = await fetch(url, { headers: { Authorization: `Bearer ${currentToken}`, ...ctxHeaders } });
 
@@ -326,6 +335,29 @@ export async function paginateRdash<T>(
       });
       throw new RdashResponseShapeError(path);
     }
+    if (opts?.untilCount) {
+      // TODO(verify): config page envelope is `{ data: { count, data: [...] } }`
+      // with `count` = total matching items (docs/api-notes.md → #2).
+      const count = root && !Array.isArray(root) ? (root as { count?: unknown }).count : undefined;
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+        console.error("[paginateRdash] untilCount: missing/invalid count", { path, offset });
+        throw new RdashResponseShapeError(path);
+      }
+      total = count;
+      for (const item of page) out.push(item);
+      if (out.length >= total) return out;
+      if (page.length === 0) {
+        console.error("[paginateRdash] untilCount: empty page before count reached", {
+          path,
+          offset,
+          collected: out.length,
+          count: total,
+        });
+        throw new RdashResponseShapeError(path);
+      }
+      offset += page.length;
+      continue;
+    }
     // Defensive dedup: some rDash list endpoints ignore `limit`/`offset` and
     // return the full set on every call. Without this, the loop pushes the
     // same items up to 200 times and downstream callers see 75k "elements"
@@ -344,16 +376,25 @@ export async function paginateRdash<T>(
       out.push(item);
       addedThisPage++;
     }
-    if (page.length < PAGE) break;
+    // Normal stop: a short page is the last page.
+    if (page.length < PAGE) return out;
     // rDash returned a "full" page but none of it was new → pagination is
     // being ignored. Stop here rather than loop 199 more times.
     if (addedThisPage === 0) {
       console.warn("[paginateRdash] no new items in page — likely ignored pagination, stopping", { path, offset, pageLen: page.length, accumulated: out.length });
-      break;
+      return out;
     }
     offset += PAGE;
   }
-  return out;
+  // Only reachable when MAX_PAGES requests never hit a normal stop (or never
+  // reached `count`): the list is incomplete → error, never a partial list.
+  console.error("[paginateRdash] page cap hit before the list ended", {
+    path,
+    maxPages: MAX_PAGES,
+    collected: out.length,
+    count: opts?.untilCount ? total : undefined,
+  });
+  throw new RdashResponseShapeError(path);
 }
 
 // ============ Vendors (org-level) ============

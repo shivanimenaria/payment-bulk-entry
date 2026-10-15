@@ -127,7 +127,7 @@ pbe2/
 │   │   │   ├── db.ts                   # PG pool, query, transactions
 │   │   │   ├── rdash-id.ts             # rDash hashid encode/decode
 │   │   │   ├── respond-safe.ts
-│   │   │   └── rdash-source/           # index.ts (mock|real switch), types.ts, real.ts, mock.ts, mock-data/
+│   │   │   └── rdash-source/           # index.ts (getRdashSource), mode.ts (getDataSource), types.ts (RdashSource), real.ts, mock.ts, allocation-rows.ts (config+details merge), mock-data/
 │   │   ├── embedded-bootstrap-url.ts   # Pure bootstrap URL helpers + BOOTSTRAP_ERROR_MESSAGES (unit tested)
 │   │   ├── api-fetch.ts                # Client fetch wrapper (401 → /embedded/bootstrap?force=1)
 │   │   ├── auth-context.tsx            # Client SessionProvider + useSession + buildUrl (carries vendorId)
@@ -219,7 +219,7 @@ Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not ha
 
 ## Data Source Mode
 - `RDASH_DATA_SOURCE=mock|real` — **required**; a missing or invalid value throws.
-- `mock`: data from `rdash-source/mock-data/*.json` (Swagger-shaped), auth bypassed via one explicit `getSessionOrMock()` helper that logs `[mock] auth bypassed`; mock session includes `vendorId: "mock-vendor"`; UI shows a **MOCK DATA** badge and a Payload Preview. `MOCK_FAIL_IDS` (comma list) forces bulk failures for testing.
+- `mock`: data from `rdash-source/mock-data/*.json` (Swagger-shaped), auth bypassed via one explicit `getSessionOrMock()` helper that logs `[mock] auth bypassed`; mock session includes `vendorId: "mock-vendor"`; UI shows a **MOCK DATA** badge and a Payload Preview. `MOCK_FAIL_IDS` (comma list) forces bulk failures for testing. Mock bulk also fails an entry whose `amount > payment_due`; successful entries reduce `payment_due` in an in-process copy (resets on restart) so the refetch after submit reflects them.
 - Mock must never run where real credentials are configured; real auth failure never falls back to mock.
 - `real`: rDash APIs with the user's session token.
 
