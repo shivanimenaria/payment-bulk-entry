@@ -1,11 +1,15 @@
-// Shared (client + server) bulk payload builder. Pure.
-// MINIMAL VERSION (see validation.ts). Input must come from validateSubmission.
+// Shared (client + server) bulk payload builders. Pure. Input must come from
+// validateAllocation (client) or validateSubmission (server) — both produce
+// a ValidatedSubmission containing only rows with amount > 0.
 import type { BulkPaymentEntryInput } from "@/types/rdash";
-import { fromPaise, type ValidatedSubmission } from "./validation";
+import type { BulkSubmitRequest, PaymentHeader } from "@/types/payments";
+import { fromPaise, paiseToInput } from "./money";
+import type { ValidatedSubmission } from "./validation";
 
-/** One entry per validated row. payment_date / payment_mode / transaction_id
- *  come from the header for every entry; remark is per row; proof fields are
- *  null in v1 (no upload endpoint). */
+/** One entry per validated row. payment_date / payment_mode come from the
+ *  header; transaction_id = header reference or null; remark = row remark or
+ *  null; proof fields null (v1, no upload endpoint). No other defaults. Also
+ *  what the Payload Preview shows. */
 export function buildBulkEntries(v: ValidatedSubmission): BulkPaymentEntryInput[] {
   return v.rows.map((r) => ({
     payment_request_id: r.payment_request_id,
@@ -17,4 +21,17 @@ export function buildBulkEntries(v: ValidatedSubmission): BulkPaymentEntryInput[
     transaction_proof_file_name: null,
     remark: r.remark,
   }));
+}
+
+/** Client → POST /api/rdash/payment-entries/bulk body: the header as entered
+ *  and only the selected rows (amount > 0). The server re-validates. */
+export function buildSubmitRequest(header: PaymentHeader, v: ValidatedSubmission): BulkSubmitRequest {
+  return {
+    header,
+    rows: v.rows.map((r) => ({
+      payment_request_id: r.payment_request_id,
+      amount: paiseToInput(r.amountPaise),
+      remark: r.remark,
+    })),
+  };
 }

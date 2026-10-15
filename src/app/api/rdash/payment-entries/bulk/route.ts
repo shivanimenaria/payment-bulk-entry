@@ -38,7 +38,10 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
     const result = validateSubmission({ header: body.header, rows: body.rows }, freshConfig);
     if (!result.ok) {
       return withCookieHeader(
-        NextResponse.json({ error: "Validation failed", fieldErrors: result.errors }, { status: 400 }),
+        NextResponse.json(
+          { error: "Validation failed", fieldErrors: result.errors, summary: result.summary },
+          { status: 400 },
+        ),
         cookieHeader,
       );
     }

@@ -53,7 +53,8 @@ Result panel (created / failed) below
 - Submit only when Excess = 0 and there are no validation errors.
 - Payment Done: number, `≤ payment_due`, max 2 decimals; only rows with `amount > 0` are sent.
 - Only requests with `payment_due > 0` are shown (payable `status` values **TBD**).
-- Validation runs on client **and** server (shared `lib/payments/validation.ts`).
+- Validation runs on client **and** server with the SAME functions (`lib/payments/validation.ts`: `validateAllocation` for the form, `validateSubmission` for the route; shared `validateHeader`, `checkRowAmount`, `checkExcess`, money in integer paise via `money.ts`). Errors are field-keyed (`form` / `header` / `rows[index]`) plus a flat `summary` list.
+- Rows with `detailsUnavailable` or `detailsError` cannot take an amount > 0 — **client-only** rule (`validateAllocation`); the bulk route deliberately does not check `project_id` / details. `rowError` (a previous bulk failure) does **not** block: failed rows keep their amounts for Retry failed.
 - **Vendor = session vendor.** `api/rdash/payment-requests` and `api/rdash/payment-entries/bulk` use `auth.vendorId` from the session and ignore any vendor id sent by the client (query or body) — never read, compared or forwarded.
 - **Server never trusts client payment data.** The bulk route re-fetches the session vendor's config (all pages, user's token) and validates every row against it: `payment_request_id` must be in the fresh list, unique within the submission, `payment_due > 0`, and `amount ≤` the **server-fetched** `payment_due`. Client-sent `payment_due` / amounts-due are ignored. Any invalid, duplicate or unknown row rejects the whole submission (400) before the bulk API is called.
 - Submit is single-flight — in-flight guard + disabled button; no duplicate submissions.
@@ -120,7 +121,7 @@ pbe2/
 │   │           └── payment-entries/bulk/
 │   ├── components/{ui,embedded}/
 │   ├── lib/
-│   │   ├── payments/                   # validation.ts, totals.ts, build-payload.ts, retry.ts (pure, shared)
+│   │   ├── payments/                   # money.ts, validation.ts, totals.ts, remarks.ts, build-payload.ts, retry.ts (pure, shared client+server)
 │   │   ├── server/                     # `import "server-only"`
 │   │   │   ├── api.ts                  # apiFetch, paginateRdash (noRefresh), retry, assertVendorInOrg; errors: RdashPermissionError, VendorNotFoundError, RdashUpstreamError, RdashResponseShapeError, RdashIdDecodeError
 │   │   │   ├── auth.ts                 # Handover, JWT cookie, refresh, getAuth, withAuthCookies (AuthPayload incl. vendorId)
@@ -218,7 +219,8 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 - Body `{ header, rows: [{ payment_request_id, amount, remark }] }`; only those fields are read. A vendor id in the body is ignored; a vendor id in the **query** that differs from the session makes `getAuth` refuse the request (401).
 - Validation (`lib/payments/validation.ts`, money in integer paise) → `400 { error: "Validation failed", fieldErrors: { form[], header{}, rows{ [index]: { field: msg } } } }`; the bulk API is not called.
 - If rDash's `created` + `failed` don't cover every submitted id exactly once → `502` ("Could not confirm which payments were recorded…"): nothing is reported as "not recorded", so a retry can't pay twice.
-- `lib/payments/validation.ts` / `build-payload.ts` are **minimal versions** (server-side rules only); client wiring, `totals.ts`, `retry.ts` come with the UI step.
+- The 400 body also carries `summary: string[]`.
+- Retry failed (`lib/payments/retry.ts`) resends only ids in `failed[]` with Amount Paid = their sum; an id in neither list is never resent.
 
 ### Bootstrap error codes
 `missing_vendor`, `vendor_not_found`, `vendor_forbidden`, `org_mismatch`, `session_error` — messages in `BOOTSTRAP_ERROR_MESSAGES` (`lib/embedded-bootstrap-url.ts`). Unknown codes show the generic message.
