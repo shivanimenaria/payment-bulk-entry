@@ -54,3 +54,17 @@ export interface BulkSubmitResult {
   recordedAmount: number;
   notRecordedAmount: number;
 }
+
+// POST /api/rdash/payment-entries/bulk body. Only these fields are read; any
+// client-sent payment_due / amount due / vendor is ignored by the server.
+export interface BulkSubmitRow {
+  payment_request_id: string;
+  // Payment Done (string from the input, or a number).
+  amount: string | number;
+  remark: string | null;
+}
+
+export interface BulkSubmitRequest {
+  header: PaymentHeader;
+  rows: BulkSubmitRow[];
+}

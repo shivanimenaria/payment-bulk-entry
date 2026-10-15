@@ -6,7 +6,8 @@ import path from "node:path";
 // withAuthCookies, otherwise the rotated cookie is never written (and the
 // browser keeps a refresh token rDash has already rotated → replay).
 // /api/session only calls assertVendorInOrg, which uses noRefresh.
-const REFRESHING_CALLS = /\b(apiFetch|paginateRdash|rdashFetchWithRetry|refreshAuthForRequest|listAllVendors|searchVendors)\s*[(<]/;
+// getRdashSource / loadAllocationRows reach apiFetch/paginateRdash via real.ts.
+const REFRESHING_CALLS = /\b(apiFetch|paginateRdash|rdashFetchWithRetry|refreshAuthForRequest|listAllVendors|searchVendors|getRdashSource|loadAllocationRows)\s*[(<]/;
 
 function routeFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

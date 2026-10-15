@@ -1,6 +1,6 @@
 import "server-only";
 import type { AllocationRow } from "@/types/payments";
-import type { PaymentRequestDetails } from "@/types/rdash";
+import type { PaymentRequestDetails, VendorPaymentRequestConfigItem } from "@/types/rdash";
 import { AuthError } from "../auth";
 import type { RdashSource } from "./types";
 
@@ -13,10 +13,16 @@ export const DETAILS_ERROR_MESSAGE = "Details could not be loaded";
 //  - Details call failure: the row is kept with detailsError (never dropped);
 //    the reason goes to console.error. AuthError propagates (session dead →
 //    401 → re-handover) instead of being hidden in rows.
-//  - Rows are NOT filtered here (payment_due 0 is hidden by the caller).
+//  - Rows are NOT filtered by default. `opts.keep` lets the caller drop
+//    config items BEFORE any details/projects call (e.g. payment_due 0).
 // TODO(verify): project_id on config items (docs/api-notes.md → #10).
-export async function loadAllocationRows(source: RdashSource, vendorId: string): Promise<AllocationRow[]> {
-  const config = await source.listPaymentRequestConfig(vendorId);
+export async function loadAllocationRows(
+  source: RdashSource,
+  vendorId: string,
+  opts?: { keep?: (item: VendorPaymentRequestConfigItem) => boolean },
+): Promise<AllocationRow[]> {
+  const all = await source.listPaymentRequestConfig(vendorId);
+  const config = opts?.keep ? all.filter(opts.keep) : all;
 
   const needsProjects = config.some((c) => Boolean(c.project_id));
   const projectNames = new Map<string, string>();

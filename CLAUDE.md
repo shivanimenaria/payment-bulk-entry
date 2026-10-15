@@ -214,6 +214,12 @@ Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not ha
 | `/api/rdash/payment-requests` | GET | Uses session `vendorId` (no vendor param). Config (all pages) + details (parallel, concurrency 5, only rows with `project_id`) → merged allocation rows |
 | `/api/rdash/payment-entries/bulk` | POST | Body `{ header, rows }` → re-fetch config for session vendor → server validation → build payload → bulk create → `{ count, created, failed, recordedAmount, notRecordedAmount }` |
 
+All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map errors via `lib/server/route-errors.ts` (401 / 403 fixed message / 502 generic). Bulk details:
+- Body `{ header, rows: [{ payment_request_id, amount, remark }] }`; only those fields are read. A vendor id in the body is ignored; a vendor id in the **query** that differs from the session makes `getAuth` refuse the request (401).
+- Validation (`lib/payments/validation.ts`, money in integer paise) → `400 { error: "Validation failed", fieldErrors: { form[], header{}, rows{ [index]: { field: msg } } } }`; the bulk API is not called.
+- If rDash's `created` + `failed` don't cover every submitted id exactly once → `502` ("Could not confirm which payments were recorded…"): nothing is reported as "not recorded", so a retry can't pay twice.
+- `lib/payments/validation.ts` / `build-payload.ts` are **minimal versions** (server-side rules only); client wiring, `totals.ts`, `retry.ts` come with the UI step.
+
 ### Bootstrap error codes
 `missing_vendor`, `vendor_not_found`, `vendor_forbidden`, `org_mismatch`, `session_error` — messages in `BOOTSTRAP_ERROR_MESSAGES` (`lib/embedded-bootstrap-url.ts`). Unknown codes show the generic message.
 
