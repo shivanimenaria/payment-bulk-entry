@@ -18,6 +18,12 @@ export interface AllocationRow {
   details: PaymentRequestDetails | null;
   // Project name from GET /v2/projects; null when unknown (renders "—").
   projectName: string | null;
+  // Where the project used for the details call came from: "config" =
+  // config project_id; "temporary" = RDASH_TEMP_PROJECT_ID workaround — the
+  // UI must show "(temporary)" next to the name, never as confirmed;
+  // null = no project (detailsUnavailable).
+  // TODO(remove-temp-project-id): drop "temporary" with the workaround.
+  projectIdSource: "config" | "temporary" | null;
   // Config item has no project_id → details not called (no guessing).
   detailsUnavailable: boolean;
   // Details call failed for this row (generic message; row is kept, not dropped).

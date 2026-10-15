@@ -17,6 +17,7 @@ function row(id: string, due: number, amount = "", over: Partial<AllocationRow> 
     config: cfg(id, due),
     details: null,
     projectName: "P",
+    projectIdSource: "config",
     detailsUnavailable: false,
     detailsError: null,
     amount,

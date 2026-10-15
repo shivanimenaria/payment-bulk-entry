@@ -256,6 +256,30 @@ describe("POST /api/rdash/payment-entries/bulk (real)", () => {
   });
 });
 
+describe("RDASH_TEMP_PROJECT_ID (TODO(remove-temp-project-id))", () => {
+  afterEach(() => {
+    delete process.env.RDASH_TEMP_PROJECT_ID;
+  });
+
+  it("row without project_id uses the temp project for details and is marked temporary; bulk unaffected", async () => {
+    process.env.RDASH_TEMP_PROJECT_ID = "PJ1";
+    const { rows } = await (await get(requestsGET, "/api/rdash/payment-requests")).json();
+    const pr3 = rows.find((r: { config: { payment_request_id: string } }) => r.config.payment_request_id === "PR3");
+    expect(pr3).toMatchObject({ projectIdSource: "temporary", projectName: "Tower One", detailsUnavailable: false });
+    expect(pr3.config.project_id).toBeUndefined();
+    expect(calls("/v2/projects/PJ1/vendor-payment-requests/PR3")).toHaveLength(1);
+    expect(rows.find((r: { config: { payment_request_id: string } }) => r.config.payment_request_id === "PR1").projectIdSource).toBe("config");
+
+    bulkResponse = () => ok({ count: 1, created: [{ id: "E3", payment_request_id: "PR3" }], failed: [] });
+    const res = await post({ header: header("200.5"), rows: [{ payment_request_id: "PR3", amount: "200.5", remark: null }] });
+    expect(res.status).toBe(200);
+    expect(Object.keys(JSON.parse(bulkCalls()[0][1].body).entries[0]).sort()).toEqual([
+      "amount", "payment_date", "payment_mode", "payment_request_id", "remark",
+      "transaction_id", "transaction_proof_file_name", "transaction_proof_file_url",
+    ]);
+  });
+});
+
 describe("mock mode", () => {
   beforeEach(() => {
     process.env.RDASH_DATA_SOURCE = "mock";

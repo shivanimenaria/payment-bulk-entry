@@ -177,6 +177,7 @@ Config is vendor-scoped and does **not** return `project_id`, but the details AP
 - Rows without `project_id` are marked `detailsUnavailable` — no details call, no guessing, no default project.
 - Their Request Date / Request ID / Project Name / Request Type / Due Date / Requested By show "Details pending" and the Payment Done input is disabled.
 - `project_id` on config items is typed optional with `TODO(verify)`.
+- **TEMPORARY exception** (`RDASH_TEMP_PROJECT_ID`, every use marked `TODO(remove-temp-project-id)`): when set, rows without `project_id` use that project for the details call and get `projectIdSource: "temporary"`. The UI must show "(temporary)" next to the project name, never as confirmed. Config `project_id` always wins. A details failure gives `detailsError` and the row is kept. Bulk is unaffected. Refused under `NODE_ENV=production` unless `ALLOW_TEMP_PROJECT_ID=true`, and a warning is logged on every startup while set.
 
 ### Allocation table → source
 | Column | Source |
@@ -257,6 +258,8 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 | `NEXT_PUBLIC_RDASH_UI_ORIGIN` | Both | postMessage origin allow-list |
 | `RDASH_DATA_SOURCE` | Runtime | `mock` or `real` (required) |
 | `MOCK_FAIL_IDS` | Runtime | Mock only — payment_request_ids to force-fail |
+| `RDASH_TEMP_PROJECT_ID` | Runtime | **TEMPORARY** — project hashid for details of config rows without `project_id` (rows marked "(temporary)"). Remove when config returns `project_id` |
+| `ALLOW_TEMP_PROJECT_ID` | Runtime | `true` to permit `RDASH_TEMP_PROJECT_ID` under `NODE_ENV=production`; unset everywhere else |
 
 ## Conventions
 - Server-only modules under `src/lib/server/` with `import "server-only"` guard.
@@ -289,6 +292,7 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 - **Vendor in handover**: can the consume response include `vendor` so it is authoritative (instead of URL + `/v2/vendors` check)?
 - **`/v2/vendors`**: org-scoped for the token? id encoding, envelope, required permission; single-vendor lookup (`/v2/vendors/{id}` or id filter) to avoid paging all vendors on every handover.
 - **`project_id` (+ project name) in config response** — required for cross-project details.
+- **Remove `RDASH_TEMP_PROJECT_ID` once config returns `project_id`** (and `ALLOW_TEMP_PROJECT_ID`, `projectIdSource: "temporary"`, all `TODO(remove-temp-project-id)` code; docs/api-notes.md #15).
 - **ID equivalence**: config `payment_request_id` == details `id` == bulk `payment_request_id`? Hashids or raw?
 - **Bulk authorization**: does bulk verify each `payment_request_id` belongs to the user's org/vendor?
 - **Bulk body**: `{ entries }` vs `{ data: { entries } }`; max entries per call.

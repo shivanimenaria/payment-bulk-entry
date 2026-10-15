@@ -78,6 +78,31 @@ export function resolveDataSource(env: Env): DataSource {
   return "mock";
 }
 
+// ── RDASH_TEMP_PROJECT_ID (TEMPORARY workaround) ────────────
+// TODO(remove-temp-project-id): remove once the config response returns
+// project_id (docs/api-notes.md → #15). Until then, config items without
+// project_id use this project for the details call, flagged "temporary".
+// Rules (fail closed, like PBE_ALLOW_MOCK_IN_PRODUCTION):
+//   unset                                   → null (feature off)
+//   set, NODE_ENV !== "production"          → allowed
+//   set, NODE_ENV === "production"          → only with ALLOW_TEMP_PROJECT_ID=true
+//   ALLOW_TEMP_PROJECT_ID ≠ "true", or set without RDASH_TEMP_PROJECT_ID → throws
+export function resolveTempProjectId(env: Env): string | null {
+  const id = env.RDASH_TEMP_PROJECT_ID?.trim() || undefined;
+  const allow = env.ALLOW_TEMP_PROJECT_ID || undefined;
+  if (allow !== undefined && allow !== "true") {
+    throw new Error('ALLOW_TEMP_PROJECT_ID must be "true" or unset');
+  }
+  if (!id) {
+    if (allow !== undefined) throw new Error("ALLOW_TEMP_PROJECT_ID must not be set without RDASH_TEMP_PROJECT_ID");
+    return null;
+  }
+  if (env.NODE_ENV === "production" && allow !== "true") {
+    throw new Error("RDASH_TEMP_PROJECT_ID is not allowed with NODE_ENV=production unless ALLOW_TEMP_PROJECT_ID=true");
+  }
+  return id;
+}
+
 /** Startup check (instrumentation.ts). Throws on any invalid configuration. */
 export function validateRuntimeConfig(env: Env): DataSource {
   parseCookieSecret(env.COOKIE_SECRET);
@@ -87,5 +112,6 @@ export function validateRuntimeConfig(env: Env): DataSource {
   if (source === "real" && !env.RDASH_PBE_TAB_CODE) {
     throw new Error("RDASH_PBE_TAB_CODE must be set when RDASH_DATA_SOURCE=real");
   }
+  resolveTempProjectId(env); // TODO(remove-temp-project-id)
   return source;
 }

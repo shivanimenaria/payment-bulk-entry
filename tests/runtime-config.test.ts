@@ -3,6 +3,7 @@ import {
   parseCookieSecret,
   getCookieSecretKey,
   resolveDataSource,
+  resolveTempProjectId,
   validateRuntimeConfig,
 } from "@/lib/runtime-config";
 
@@ -99,5 +100,31 @@ describe("resolveDataSource (mock auth + mock data switch)", () => {
     expect(validateRuntimeConfig({ RDASH_DATA_SOURCE: "mock", COOKIE_SECRET: VALID, NODE_ENV: "development" })).toBe(
       "mock",
     );
+  });
+
+  describe("RDASH_TEMP_PROJECT_ID (TODO(remove-temp-project-id))", () => {
+    const base = { RDASH_DATA_SOURCE: "real", COOKIE_SECRET: VALID, RDASH_PBE_TAB_CODE: "pbe" };
+
+    it("unset → off", () => {
+      expect(resolveTempProjectId({})).toBeNull();
+    });
+
+    it("allowed outside production", () => {
+      expect(resolveTempProjectId({ RDASH_TEMP_PROJECT_ID: "pHASH", NODE_ENV: "development" })).toBe("pHASH");
+    });
+
+    it("production without ALLOW_TEMP_PROJECT_ID=true → startup error", () => {
+      expect(() => validateRuntimeConfig({ ...base, NODE_ENV: "production", RDASH_TEMP_PROJECT_ID: "pHASH" })).toThrow(
+        /RDASH_TEMP_PROJECT_ID is not allowed with NODE_ENV=production/,
+      );
+      expect(
+        validateRuntimeConfig({ ...base, NODE_ENV: "production", RDASH_TEMP_PROJECT_ID: "pHASH", ALLOW_TEMP_PROJECT_ID: "true" }),
+      ).toBe("real");
+    });
+
+    it("bad flag value or flag without the id → error", () => {
+      expect(() => resolveTempProjectId({ RDASH_TEMP_PROJECT_ID: "p", ALLOW_TEMP_PROJECT_ID: "1" })).toThrow(/must be "true"/);
+      expect(() => resolveTempProjectId({ ALLOW_TEMP_PROJECT_ID: "true" })).toThrow(/without RDASH_TEMP_PROJECT_ID/);
+    });
   });
 });

@@ -148,6 +148,65 @@ describe("loadAllocationRows", () => {
     ...(project_id ? { project_id } : {}),
   });
 
+  describe("RDASH_TEMP_PROJECT_ID (TODO(remove-temp-project-id))", () => {
+    afterEach(() => {
+      delete process.env.RDASH_TEMP_PROJECT_ID;
+      delete process.env.ALLOW_TEMP_PROJECT_ID;
+    });
+
+    it("config project_id wins; the temp id is ignored for that row", async () => {
+      process.env.RDASH_TEMP_PROJECT_ID = "pTEMP";
+      const src = stubSource([cfg("a", "p1")]);
+      const [row] = await loadAllocationRows(src, "v");
+      expect(src.getPaymentRequestDetails).toHaveBeenCalledWith("p1", "a");
+      expect(src.getPaymentRequestDetails).not.toHaveBeenCalledWith("pTEMP", expect.anything());
+      expect(row).toMatchObject({ projectIdSource: "config", projectName: "Project One", detailsUnavailable: false });
+    });
+
+    it("no project_id + temp id set → details via temp id, row marked temporary, config untouched", async () => {
+      process.env.RDASH_TEMP_PROJECT_ID = "p1";
+      const src = stubSource([cfg("a")]);
+      const [row] = await loadAllocationRows(src, "v");
+      expect(src.getPaymentRequestDetails).toHaveBeenCalledWith("p1", "a");
+      expect(row).toMatchObject({
+        projectIdSource: "temporary",
+        projectName: "Project One",
+        detailsUnavailable: false,
+        detailsError: null,
+      });
+      expect(row.details?.id).toBe("a");
+      expect(row.config.project_id).toBeUndefined();
+    });
+
+    it("temp id but the request is in another project → details fail → detailsError, row kept", async () => {
+      process.env.RDASH_TEMP_PROJECT_ID = "p1";
+      const src = stubSource([cfg("a"), cfg("b", "p1")], {
+        getPaymentRequestDetails: vi.fn(async (_p: string, id: string) => {
+          if (id === "a") throw new Error("404 not in project");
+          return { ...detailsJson[0], id };
+        }),
+      });
+      const rows = await loadAllocationRows(src, "v");
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ projectIdSource: "temporary", details: null, detailsError: DETAILS_ERROR_MESSAGE });
+    });
+
+    it("neither project_id nor temp id → detailsUnavailable, no details call", async () => {
+      const src = stubSource([cfg("a")]);
+      const [row] = await loadAllocationRows(src, "v");
+      expect(src.getPaymentRequestDetails).not.toHaveBeenCalled();
+      expect(row).toMatchObject({ projectIdSource: null, detailsUnavailable: true, projectName: null });
+    });
+
+    it("invalid combination at request time fails closed (no details with an unapproved temp id)", async () => {
+      process.env.RDASH_TEMP_PROJECT_ID = "p1";
+      process.env.ALLOW_TEMP_PROJECT_ID = "yes";
+      const src = stubSource([cfg("a")]);
+      await expect(loadAllocationRows(src, "v")).rejects.toThrow(/ALLOW_TEMP_PROJECT_ID/);
+      expect(src.getPaymentRequestDetails).not.toHaveBeenCalled();
+    });
+  });
+
   it("mock: all 6 rows with project names and details; zero-due row kept for the caller to hide", async () => {
     const rows = await loadAllocationRows(createMockSource(), "mock-vendor");
     expect(rows).toHaveLength(6);
