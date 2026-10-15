@@ -1,0 +1,15 @@
+# rDash API notes — unverified assumptions
+
+Every assumption PBE makes about rDash that has **not** been confirmed by the rDash team or a live call. Each one is marked `TODO(verify)` at the code point that depends on it. When an item is confirmed, record the evidence here and remove the marker.
+
+Status key: **Unverified**: assumed from the Swagger docs, the RFQ app, or the integration brief. **Verified**: confirmed (note how and when).
+
+| # | Topic | Assumption | Code point (`TODO(verify)`) | If wrong | Status |
+|---|---|---|---|---|---|
+| 1 | ID encoding | rDash ids are Hashids (min length 16) with the PBE per-app salt `EMBEDDED_APPS_HASH_ID_SALT_PBE`. This applies to the iframe URL `vendor_id` / `org_id` / `user_id` / `project_id`, handover `user.id` / `org.id`, `/v2/vendors` `id`, and config/details/bulk `payment_request_id`. | `src/lib/server/rdash-id.ts` (header); `src/app/api/session/route.ts` (`toIntString`); `src/lib/server/api.ts` (`decodeIdField`) | URL vendor/org ids fail to decode, giving `vendor_not_found` or `org_mismatch`. A list id that doesn't decode throws `RdashIdDecodeError` (shown as `session_error` at handover). | Unverified |
+| 2 | List envelope | List endpoints return `{ data: [...] }` or `{ data: { data: [...] } }`. Paging is `limit` / `offset`, and a page shorter than `limit` means it's the last page. | `src/lib/server/api.ts` (`paginateRdash`) | Any other shape throws `RdashResponseShapeError`; it is never treated as an empty list. | Unverified |
+| 3 | `/v2/vendors` | Scoped to the token's org; returns `id, name, code` with hashid `id`s; no filter by id (only `name`, `code`, `limit`, `offset`); permission `CAN_ACCESS_MANAGE_VENDOR` (taken from the RFQ docs). | `src/lib/server/api.ts` (`assertVendorInOrg`) | If not org-scoped, the "vendor belongs to org" check proves nothing. If users lack the permission, every handover gives `vendor_forbidden`. With no id filter, every handover pages through all of the org's vendors. | Unverified |
+| 4 | Iframe URL | rDash opens `/embedded/bootstrap?vendor_id=…&org_id=…&user_id=…` (`project_id` optional) and never navigates the iframe to `/api/session` directly. | `src/app/api/session/route.ts` (`toIntString`, same marker as #1) | Login-CSRF mitigation options change (see CLAUDE.md Open Items). | Unverified |
+| 5 | Handover `app_slug` | The consume response's `app_slug` equals the tab slug configured as `RDASH_PBE_TAB_CODE`. | `src/app/api/session/route.ts` (`app_slug` check) | Every real-mode handover fails with `session_error`. | Unverified |
+| 6 | Token lifetimes | The consume and refresh responses always include positive `expires_in` and `refresh_token_expires_in` (seconds), and refresh always returns a new `refresh_token`. | `src/lib/server/auth.ts` (`consumeHandoverCode`, `callRdashRefresh`) | Handover fails (`session_error`), or refresh throws `AuthError` and the iframe re-handovers. Lifetimes are never defaulted and an old refresh token is never reused. | Unverified |
+| 7 | Handover `user.email` | Optional; may be absent. | `src/lib/server/auth.ts` (`consumeHandoverCode`) | None: stored as `null`. | Unverified |

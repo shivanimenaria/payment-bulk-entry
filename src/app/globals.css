@@ -1,0 +1,262 @@
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-thin.ttf') format('truetype'); font-weight: 100; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-thinitalic.ttf') format('truetype'); font-weight: 100; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-ultralight.ttf') format('truetype'); font-weight: 200; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-ultralightitalic.ttf') format('truetype'); font-weight: 200; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-light.ttf') format('truetype'); font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-lightitalic.ttf') format('truetype'); font-weight: 300; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-regularitalic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-mediumitalic.ttf') format('truetype'); font-weight: 500; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-semibold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-semibolditalic.ttf') format('truetype'); font-weight: 600; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-bolditalic.ttf') format('truetype'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-extrabold.ttf') format('truetype'); font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-extrabolditalic.ttf') format('truetype'); font-weight: 800; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-black.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Gilroy'; src: url('/fonts/gilroy-blackitalic.ttf') format('truetype'); font-weight: 900; font-style: italic; font-display: swap; }
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 72% 51%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 85%;
+    --input: 0 0% 85%;
+    --ring: 0 72% 51%;
+    --radius: 0.5rem;
+    --font-stack: Gilroy, system-ui, -apple-system, sans-serif;
+
+    --type-display-size: 6rem;
+    --type-h1-size: 3.75rem;
+    --type-h2-size: 3rem;
+    --type-h3-size: 2.125rem;
+    --type-h4-size: 1.5rem;
+    --type-h5-size: 1.25rem;
+    --type-base-size: 1rem;
+    --type-small-size: 0.875rem;
+    --type-caption-size: 0.75rem;
+
+    --font-weight-regular: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-stack);
+    font-weight: 400;
+    font-size: 1rem;
+    line-height: 1.5;
+  }
+
+  /* Fix sticky table cell rendering — forces GPU compositing layer */
+  th[class*="sticky"], td[class*="sticky"] {
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+  }
+
+  /* Hide the up/down spinner on number inputs across the whole app —
+     they're rarely useful, add visual clutter, and the rate inputs
+     already block ArrowUp/ArrowDown via onKeyDown for the same reason. */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  /* Comparison table frozen column positions */
+  :root {
+    --ct-c0: 0px;
+    --ct-c1: 40px;
+    --ct-c2: 72px;
+    --ct-c3: 272px;
+    --ct-c4: 392px;
+  }
+}
+
+@layer utilities {
+  /* Force the vertical scrollbar to stay visible (macOS hides it by default).
+     Used inside SelectContent so long dropdowns always show the scrollbar.
+     `!important` on width is needed because some macOS WebKit builds otherwise
+     collapse the bar to 0px when the OS preference is "show on scrolling". */
+  .always-scrollbar::-webkit-scrollbar {
+    width: 12px !important;
+    height: 12px !important;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(0, 0, 0, 0.06);
+  }
+  .always-scrollbar::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.06);
+    border-radius: 8px;
+  }
+  .always-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.45);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    min-height: 24px;
+  }
+  .always-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(0, 0, 0, 0.65);
+  }
+  .always-scrollbar {
+    scrollbar-width: auto;
+    scrollbar-color: rgba(0, 0, 0, 0.45) rgba(0, 0, 0, 0.06);
+    /* Reserve gutter even when content fits, so opening a long dropdown
+       and a short one don't visibly jitter as the bar appears/disappears. */
+    scrollbar-gutter: stable;
+  }
+
+  /* Always-visible horizontal scrollbar in a light tint. Vendor portal item
+     tables overflow horizontally; without this, macOS hides the bar entirely
+     ("show on scrolling" OS preference) until the user starts scrolling, so
+     vendors don't realise there's more content to the right. Light grey
+     thumb keeps it visually unobtrusive.
+     The `!important` on height + `-webkit-appearance: none` are needed because
+     some macOS WebKit builds collapse the bar to 0px when the OS preference
+     is "auto-hide" — same reason as `.always-scrollbar` for the vertical
+     case in the dropdown menus. Pair this class with `overflow-x-scroll`
+     (not -auto) on the container so the track is rendered unconditionally. */
+  .scrollbar-light-x {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f1f5f9;
+    scrollbar-gutter: stable;
+  }
+  .scrollbar-light-x::-webkit-scrollbar {
+    height: 10px !important;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #f1f5f9;
+  }
+  .scrollbar-light-x::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 8px;
+  }
+  .scrollbar-light-x::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    min-width: 24px;
+  }
+  .scrollbar-light-x::-webkit-scrollbar-thumb:hover {
+    background-color: #94a3b8;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-stack);
+    font-size: 6rem;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+  }
+  .font-h1 {
+    font-family: var(--font-stack);
+    font-size: 3.75rem;
+    font-weight: 700;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+  }
+  .font-h2 {
+    font-family: var(--font-stack);
+    font-size: 3rem;
+    font-weight: 600;
+    line-height: 1.08;
+    letter-spacing: -0.01em;
+  }
+  .font-h3 {
+    font-family: var(--font-stack);
+    font-size: 2.125rem;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+  .font-h4 {
+    font-family: var(--font-stack);
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: 0em;
+  }
+  .font-h5 {
+    font-family: var(--font-stack);
+    font-size: 1.25rem;
+    font-weight: 500;
+    line-height: 1.3;
+    letter-spacing: 0em;
+  }
+  .font-body-lg {
+    font-family: var(--font-stack);
+    font-size: 1.125rem;
+    font-weight: 400;
+    line-height: 1.6;
+    letter-spacing: 0em;
+  }
+  .font-body {
+    font-family: var(--font-stack);
+    font-size: 1rem;
+    font-weight: 400;
+    line-height: 1.5;
+    letter-spacing: 0em;
+  }
+  .font-small {
+    font-family: var(--font-stack);
+    font-size: 0.875rem;
+    font-weight: 400;
+    line-height: 1.4;
+    letter-spacing: 0.01em;
+  }
+  .font-caption {
+    font-family: var(--font-stack);
+    font-size: 0.75rem;
+    font-weight: 400;
+    line-height: 1.3;
+    letter-spacing: 0.02em;
+  }
+  .font-button {
+    font-family: var(--font-stack);
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: 0.04em;
+  }
+  .font-overline {
+    font-family: var(--font-stack);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+}
