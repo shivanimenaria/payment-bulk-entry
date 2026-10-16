@@ -1,9 +1,20 @@
-import { redirect } from "next/navigation";
+"use client";
 
-// Render per request so the redirect is a real HTTP 307 with a Location header
-// (a statically prerendered redirect only works client-side).
-export const dynamic = "force-dynamic";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useSession } from "@/lib/auth-context";
 
+// "/" → /payments, carrying the session params (orgId/projectId/userId/
+// vendorId) via buildUrl so middleware keeps the cookie in sync.
 export default function Home() {
-  redirect("/payments");
+  const router = useRouter();
+  const { buildUrl } = useSession();
+
+  useEffect(() => {
+    router.replace(buildUrl("/payments"));
+    // buildUrl reads window.location; run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return null;
 }

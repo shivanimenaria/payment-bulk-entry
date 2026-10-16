@@ -36,7 +36,8 @@ Status | Requested Amount | Payment Due | Payment Done [input + Pay in full] | R
 [Submit payments] [Cancel]
 Result panel (created / failed) below
 ```
-- rDash look: white surfaces, thin grey borders, red primary `#E53935`, Gilroy, compact table, left icon sidebar like rDash.
+- rDash look: white surfaces, thin grey borders, red primary `#E53935`, Gilroy, compact table.
+- No sidebar of its own: PBE runs inside rDash's Vendor Payments sub-tab, which already has rDash's sidebar. Pages = `PageHeader` + content area (`components/shell/AppShell.tsx`).
 - Wide table scrolls horizontally inside its own container; header and summary stay visible.
 - No vendor field: the vendor is fixed by the iframe URL / session.
 

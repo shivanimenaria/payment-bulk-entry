@@ -234,3 +234,34 @@ describe("retry", () => {
     expect(server.ok).toBe(true);
   });
 });
+
+describe("allocation actions", () => {
+  // Imported lazily to keep this block self-contained.
+  it("Pay in full sets the exact due; Clear resets editable rows; locked rows untouched", async () => {
+    const { payInFull, clearAppliedAmounts, isAmountEditable, setRowAmount } = await import("@/lib/payments/allocation");
+    expect(payInFull(row("a", 45000.5)).amount).toBe("45000.5");
+    const pending = row("b", 100, "", { detailsUnavailable: true });
+    const failedDetails = row("c", 100, "", { detailsError: "x" });
+    const failedBulk = row("d", 100, "40", { rowStatus: "failed", rowError: "Rejected" });
+    for (const r of [pending, failedDetails, failedBulk]) {
+      expect(isAmountEditable(r)).toBe(false);
+      expect(payInFull(r)).toBe(r);
+      expect(setRowAmount(r, "5")).toBe(r);
+    }
+    const cleared = clearAppliedAmounts([row("e", 10, "10"), failedBulk]);
+    expect(cleared.map((r) => r.amount)).toEqual(["", "40"]);
+  });
+});
+
+describe("format", () => {
+  it("Indian grouping, dd/mm/yyyy, dashes for null", async () => {
+    const { formatAmount, formatINR, formatDate, textOrDash } = await import("@/lib/format");
+    expect(formatAmount(12345678.5)).toBe("1,23,45,678.50");
+    expect(formatINR(200000)).toBe("₹2,00,000.00");
+    expect(formatAmount(null)).toBe("—");
+    expect(formatDate("2026-09-03")).toBe("03/09/2026");
+    expect(formatDate("2026-08-04T20:00:00Z")).toBe("05/08/2026"); // IST
+    expect(formatDate(null)).toBe("—");
+    expect(textOrDash("")).toBe("—");
+  });
+});

@@ -1,4 +1,5 @@
-// TODO: payment form + allocation table
+import { NewPaymentClient } from "./NewPaymentClient";
+
 export default function NewPaymentPage() {
-  return <main className="p-6" />;
+  return <NewPaymentClient />;
 }

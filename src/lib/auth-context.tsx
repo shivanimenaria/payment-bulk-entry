@@ -103,6 +103,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       cancelled = true;
+      // Drop the in-flight ping: its .then is bound to THIS effect's
+      // `cancelled` flag, so a remount (React StrictMode in dev, or any
+      // re-mount) reusing it would never set the session.
+      inflightRef.current = null;
       clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
     };
