@@ -19,6 +19,7 @@ export function AllocationRow({
   onAmount,
   onPayInFull,
   onRemark,
+  onRemove,
 }: {
   row: Row;
   index: number;
@@ -26,6 +27,8 @@ export function AllocationRow({
   onAmount: (value: string) => void;
   onPayInFull: () => void;
   onRemark: (value: string) => void;
+  /** Remove a failed (rowError) row from the pending payment. */
+  onRemove: () => void;
 }) {
   const d = row.details;
   const editable = isAmountEditable(row);
@@ -93,6 +96,19 @@ export function AllocationRow({
           </button>
         </div>
         {inlineError ? <p className="mt-1 max-w-[220px] whitespace-normal text-[11px] text-red-600">{inlineError}</p> : null}
+        {row.rowError ? (
+          <button
+            type="button"
+            onClick={onRemove}
+            className="mt-1 text-[11px] font-medium text-gray-600 underline-offset-2 hover:text-gray-900 hover:underline"
+            title="Don't retry this request — clears its amount and unlocks the row"
+          >
+            Remove
+          </button>
+        ) : null}
+        {row.rowStatus === "created" && !inlineError ? (
+          <p className="mt-1 text-[11px] font-medium text-green-700">Recorded</p>
+        ) : null}
       </td>
       <td className={cn(cell, "min-w-[200px]")}>
         <input

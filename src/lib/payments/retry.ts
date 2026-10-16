@@ -43,3 +43,17 @@ export function buildRetryRequest(result: BulkSubmitResult, previous: BulkSubmit
   }
   return { header: { ...previous.header, amountPaid: paiseToInput(paise) }, rows };
 }
+
+/** Drop one id from the retryable failures (after the user removed that row).
+ *  Only failed[] changes — created[] and the recorded/not-recorded amounts are
+ *  what actually happened and stay as reported. */
+export function removeFailedId(result: BulkSubmitResult, id: string): BulkSubmitResult {
+  return { ...result, failed: result.failed.filter((f) => f.payment_request_id !== id) };
+}
+
+/** Header Amount Paid after a partial failure = the not-recorded amount still
+ *  retryable ("" when nothing is left — never "0", which would be invalid). */
+export function retryAmountPaid(result: BulkSubmitResult, previous: BulkSubmitRequest): string {
+  if (result.failed.length === 0) return "";
+  return buildRetryRequest(result, previous).header.amountPaid;
+}

@@ -60,7 +60,9 @@ Result panel (created / failed) below
 - **Server never trusts client payment data.** The bulk route re-fetches the session vendor's config (all pages, user's token) and validates every row against it: `payment_request_id` must be in the fresh list, unique within the submission, `payment_due > 0`, and `amount ≤` the **server-fetched** `payment_due`. Client-sent `payment_due` / amounts-due are ignored. Any invalid, duplicate or unknown row rejects the whole submission (400) before the bulk API is called.
 - Submit is single-flight — in-flight guard + disabled button; no duplicate submissions.
 - **Partial failure**: show "₹X recorded, ₹Y NOT recorded"; failed rows keep their amounts and remarks; **Retry failed** resends ONLY failed entries; Amount Paid becomes the not-recorded amount.
-- Table refetches after every submit.
+- **Remove** (on a failed row): `dismissFailedRow` clears its amount + `rowError` and unlocks it (remark kept); `removeFailedId` drops it from the stored retry state so Retry failed never sends it; Amount Paid becomes what is still retryable (`retryAmountPaid`, `""` when nothing is left). The result panel keeps the reported amounts and marks the row "Removed".
+- Table refetches after every submit (and after a network error — the submit may have reached rDash). `lib/payments/submit.ts` `mergeRowsAfterSubmit`: created rows → amount cleared; failed rows → keep amount + remark, `rowError`, locked; other rows keep their edits. Full success also resets the header.
+- Submit responses: 200 → result panel; 400 → `fieldErrors.rows` mapped back to table rows (`mapServerRowErrors`), "Nothing was recorded"; 403 → permission message; 401 → `apiFetch` re-handover; 502 / network error / unexpected body → "Could not confirm whether the payments were recorded…" (never shown as success or as "not recorded").
 - **Not in PBE**: vendor selector, per-row payment date, paid-through account, drafts, refunds, vendor advance/excess, transaction proof upload (v1 → `transaction_proof_*` = `null`).
 
 ## Embedding & Session (handover-only)
@@ -122,7 +124,7 @@ pbe2/
 │   │           └── payment-entries/bulk/
 │   ├── components/{ui,embedded}/
 │   ├── lib/
-│   │   ├── payments/                   # money.ts, validation.ts, totals.ts, remarks.ts, build-payload.ts, retry.ts (pure, shared client+server)
+│   │   ├── payments/                   # money.ts, validation.ts, totals.ts, remarks.ts, allocation.ts, build-payload.ts, retry.ts, submit.ts (pure, shared client+server)
 │   │   ├── server/                     # `import "server-only"`
 │   │   │   ├── api.ts                  # apiFetch, paginateRdash (noRefresh), retry, assertVendorInOrg; errors: RdashPermissionError, VendorNotFoundError, RdashUpstreamError, RdashResponseShapeError, RdashIdDecodeError
 │   │   │   ├── auth.ts                 # Handover, JWT cookie, refresh, getAuth, withAuthCookies (AuthPayload incl. vendorId)

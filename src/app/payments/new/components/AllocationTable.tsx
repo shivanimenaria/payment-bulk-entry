@@ -26,12 +26,14 @@ export function AllocationTable({
   onAmount,
   onPayInFull,
   onRemark,
+  onRemove,
 }: {
   rows: Row[];
   rowErrors: Record<number, Record<string, string>>;
   onAmount: (index: number, value: string) => void;
   onPayInFull: (index: number) => void;
   onRemark: (index: number, value: string) => void;
+  onRemove: (index: number) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
@@ -59,6 +61,7 @@ export function AllocationTable({
               onAmount={(v) => onAmount(i, v)}
               onPayInFull={() => onPayInFull(i)}
               onRemark={(v) => onRemark(i, v)}
+              onRemove={() => onRemove(i)}
             />
           ))}
         </tbody>

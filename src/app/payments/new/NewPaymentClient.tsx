@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { Button } from "@/components/ui/button";
 import { useUI } from "@/components/ui/toast-confirm";
@@ -10,17 +11,38 @@ import { useSession } from "@/lib/auth-context";
 import { validateAllocation } from "@/lib/payments/validation";
 import { computeTotals } from "@/lib/payments/totals";
 import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
-import { clearAppliedAmounts, payInFull, setRowAmount } from "@/lib/payments/allocation";
-import { buildBulkEntries } from "@/lib/payments/build-payload";
-import type { AllocationRow, PaymentHeader as PaymentHeaderValue } from "@/types/payments";
+import { clearAppliedAmounts, dismissFailedRow, payInFull, setRowAmount } from "@/lib/payments/allocation";
+import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
+import { buildRetryEntries, buildRetryRequest, removeFailedId, retryAmountPaid } from "@/lib/payments/retry";
+import {
+  isBulkSubmitResult,
+  isValidationRejection,
+  mapServerRowErrors,
+  mergeRowsAfterSubmit,
+  sentAmounts,
+} from "@/lib/payments/submit";
+import type { BulkPaymentEntryInput } from "@/types/rdash";
+import type {
+  AllocationRow,
+  BulkSubmitRequest,
+  BulkSubmitResult,
+  PaymentHeader as PaymentHeaderValue,
+} from "@/types/payments";
 import { PaymentHeader } from "./components/PaymentHeader";
 import { SummaryCards } from "./components/SummaryCards";
 import { AllocationTable, TableSkeleton } from "./components/AllocationTable";
 import { EmptyState, LoadError } from "./components/EmptyState";
 import { ValidationList } from "./components/ValidationList";
 import { PayloadPreview } from "./components/PayloadPreview";
+import { SubmitResult, type SubmitOutcome } from "./components/SubmitResult";
 
 type LoadState = { status: "loading" } | { status: "error"; message: string } | { status: "ready" };
+
+/** What was sent, kept for the payload preview and Retry failed. */
+interface Sent {
+  request: BulkSubmitRequest;
+  entries: BulkPaymentEntryInput[];
+}
 
 const EMPTY_HEADER: PaymentHeaderValue = {
   amountPaid: "",
@@ -30,9 +52,35 @@ const EMPTY_HEADER: PaymentHeaderValue = {
   remark: "",
 };
 
+const BULK_URL = "/api/rdash/payment-entries/bulk";
 const LOAD_ERROR = "Could not load payment requests. Please try again.";
+const SUBMIT_UNKNOWN =
+  "Could not confirm whether the payments were recorded. Check Payment Entries in rDash before submitting again.";
+const REFRESH_ERROR = "Payments were submitted, but the table could not be refreshed.";
 
-// /payments/new — header, summary, allocation table, live validation.
+const errorText = (body: unknown, fallback: string): string =>
+  body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
+    ? (body as { error: string }).error
+    : fallback;
+
+async function fetchRows(): Promise<{ ok: true; rows: AllocationRow[] } | { ok: false; message: string }> {
+  try {
+    const res = await apiFetch("/api/rdash/payment-requests", { cache: "no-store" });
+    const body: unknown = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, message: errorText(body, LOAD_ERROR) };
+    const list = body && typeof body === "object" ? (body as { rows?: unknown }).rows : undefined;
+    if (!Array.isArray(list)) {
+      console.error("[new-payment] unexpected /api/rdash/payment-requests body");
+      return { ok: false, message: LOAD_ERROR };
+    }
+    return { ok: true, rows: list as AllocationRow[] };
+  } catch (err) {
+    console.error("[new-payment] load failed", err);
+    return { ok: false, message: LOAD_ERROR };
+  }
+}
+
+// /payments/new — header, summary, allocation table, live validation, submit.
 // Every calculation / rule comes from lib/payments; this component only
 // holds state and wires events.
 export function NewPaymentClient() {
@@ -48,34 +96,33 @@ export function NewPaymentClient() {
   // list under the table shows everything once the form is dirty.
   const [touched, setTouched] = useState<Set<keyof PaymentHeaderValue>>(() => new Set());
 
+  // ── Submit state ──
+  // Single-flight: the ref blocks a second submit before React re-renders;
+  // `submitting` drives the disabled button + spinner.
+  const inFlightRef = useRef(false);
+  const [submitting, setSubmitting] = useState<"submit" | "retry" | null>(null);
+  const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
+  // The request that produced the current partial result (for Retry failed).
+  const [resultSent, setResultSent] = useState<{ sent: Sent; result: BulkSubmitResult } | null>(null);
+  const [lastSent, setLastSent] = useState<Sent | null>(null);
+  const [serverRowErrors, setServerRowErrors] = useState<Record<number, string>>({});
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  // Failed ids the user removed (shown as "Removed" in the result panel).
+  const [removedIds, setRemovedIds] = useState<Set<string>>(() => new Set());
+
   // Latest header remark for rows arriving after the user typed one.
   const headerRemarkRef = useRef(header.remark);
   headerRemarkRef.current = header.remark;
 
   const loadRows = useCallback(async () => {
     setLoad({ status: "loading" });
-    try {
-      const res = await apiFetch("/api/rdash/payment-requests", { cache: "no-store" });
-      const body: unknown = await res.json().catch(() => null);
-      if (!res.ok) {
-        const msg = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
-          ? (body as { error: string }).error
-          : LOAD_ERROR;
-        setLoad({ status: "error", message: msg });
-        return;
-      }
-      const list = body && typeof body === "object" ? (body as { rows?: unknown }).rows : undefined;
-      if (!Array.isArray(list)) {
-        console.error("[new-payment] unexpected /api/rdash/payment-requests body");
-        setLoad({ status: "error", message: LOAD_ERROR });
-        return;
-      }
-      setRows(applyHeaderRemark(list as AllocationRow[], headerRemarkRef.current));
-      setLoad({ status: "ready" });
-    } catch (err) {
-      console.error("[new-payment] load failed", err);
-      setLoad({ status: "error", message: LOAD_ERROR });
+    const r = await fetchRows();
+    if (!r.ok) {
+      setLoad({ status: "error", message: r.message });
+      return;
     }
+    setRows(applyHeaderRemark(r.rows, headerRemarkRef.current));
+    setLoad({ status: "ready" });
   }, []);
 
   useEffect(() => {
@@ -84,17 +131,154 @@ export function NewPaymentClient() {
 
   const totals = useMemo(() => computeTotals(header.amountPaid, rows), [header.amountPaid, rows]);
   const validation = useMemo(() => validateAllocation(header, rows), [header, rows]);
-  const entries = useMemo(() => (validation.ok ? buildBulkEntries(validation.value) : null), [validation]);
+  const current = useMemo<Sent | null>(
+    () =>
+      validation.ok
+        ? { request: buildSubmitRequest(header, validation.value), entries: buildBulkEntries(validation.value) }
+        : null,
+    [validation, header],
+  );
 
-  const setHeaderField = <K extends keyof PaymentHeaderValue>(field: K, value: PaymentHeaderValue[K]) => {
+  // Client errors first; a server 400 message shows on rows the client
+  // considers valid.
+  const rowErrors = useMemo(() => {
+    const out: Record<number, Record<string, string>> = {};
+    for (const [i, msg] of Object.entries(serverRowErrors)) out[Number(i)] = { amount: msg };
+    for (const [i, fields] of Object.entries(validation.errors.rows)) out[Number(i)] = fields;
+    return out;
+  }, [serverRowErrors, validation.errors.rows]);
+
+  const edited = () => {
     setDirty(true);
+    setServerRowErrors((e) => (Object.keys(e).length ? {} : e));
+  };
+  const setHeaderField = <K extends keyof PaymentHeaderValue>(field: K, value: PaymentHeaderValue[K]) => {
+    if (inFlightRef.current) return;
+    edited();
     setTouched((t) => (t.has(field) ? t : new Set(t).add(field)));
     setHeader((h) => ({ ...h, [field]: value }));
     if (field === "remark") setRows((r) => applyHeaderRemark(r, value as string));
   };
   const updateRow = (index: number, fn: (r: AllocationRow) => AllocationRow) => {
-    setDirty(true);
+    if (inFlightRef.current) return;
+    edited();
     setRows((rs) => rs.map((r, i) => (i === index ? fn(r) : r)));
+  };
+
+  // Refetch after every response so Payment Due is current, then merge the
+  // user's state (lib/payments/submit.ts).
+  const refreshAfter = async (result: BulkSubmitResult | null, fullSuccess: boolean) => {
+    const r = await fetchRows();
+    if (!r.ok) {
+      setRefreshError(REFRESH_ERROR);
+      return;
+    }
+    setRefreshError(null);
+    setRows((prev) => {
+      const merged = mergeRowsAfterSubmit(prev, r.rows, result);
+      return fullSuccess ? applyHeaderRemark(merged, "") : merged;
+    });
+  };
+
+  const send = async (sent: Sent, kind: "submit" | "retry") => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setSubmitting(kind);
+    setOutcome(null);
+    setServerRowErrors({});
+    setRemovedIds(new Set());
+    setLastSent(sent);
+    const labels = new Map(
+      rows.map((r) => [
+        r.config.payment_request_id,
+        { requestNumber: r.details?.request_number ?? null, projectName: r.projectName },
+      ]),
+    );
+    let result: BulkSubmitResult | null = null;
+    let fullSuccess = false;
+    try {
+      let res: Response;
+      try {
+        res = await apiFetch(BULK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sent.request),
+        });
+      } catch (err) {
+        // The request may or may not have reached rDash.
+        console.error("[new-payment] submit network error", err);
+        setOutcome({ kind: "error", message: SUBMIT_UNKNOWN });
+        return;
+      }
+      // 401: apiFetch already redirected to a fresh handover.
+      if (res.status === 401) return;
+      const body: unknown = await res.json().catch(() => null);
+
+      if (res.ok && isBulkSubmitResult(body)) {
+        result = body;
+        fullSuccess = body.failed.length === 0;
+        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels });
+        if (fullSuccess) {
+          setResultSent(null);
+          setHeader(EMPTY_HEADER);
+          setTouched(new Set());
+          setDirty(false);
+        } else {
+          setResultSent({ sent, result: body });
+          // Amount Paid becomes the not-recorded amount (same rule Retry uses).
+          setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(body, sent.request) }));
+        }
+      } else if (res.status === 400 && isValidationRejection(body)) {
+        setServerRowErrors(mapServerRowErrors(sent.request, body.fieldErrors, rows));
+        setOutcome({ kind: "rejected", summary: body.summary });
+      } else if (res.status === 403) {
+        setOutcome({ kind: "error", message: errorText(body, "You do not have access to perform this action") });
+      } else {
+        // 502 (incl. "could not confirm") or an unexpected 200 body: outcome unknown.
+        if (res.ok) console.error("[new-payment] unexpected bulk response body", body);
+        setOutcome({ kind: "error", message: res.ok ? SUBMIT_UNKNOWN : errorText(body, SUBMIT_UNKNOWN) });
+      }
+    } finally {
+      // Refetch after every response (and after a network error — the
+      // submit may have reached rDash).
+      await refreshAfter(result, fullSuccess);
+      inFlightRef.current = false;
+      setSubmitting(null);
+    }
+  };
+
+  const onSubmit = () => {
+    // Re-validate at click time from the latest state (never a stale render).
+    const v = validateAllocation(header, rows);
+    if (!v.ok) return;
+    void send({ request: buildSubmitRequest(header, v.value), entries: buildBulkEntries(v.value) }, "submit");
+  };
+
+  const onRetryFailed = () => {
+    if (!resultSent) return;
+    const { sent, result } = resultSent;
+    // ONLY ids in failed[] (lib/payments/retry.ts).
+    void send(
+      { request: buildRetryRequest(result, sent.request), entries: buildRetryEntries(result, sent.entries) },
+      "retry",
+    );
+  };
+
+  // Remove a failed row: unlock it (lib rule) and drop it from Retry failed;
+  // Amount paid follows what is still retryable.
+  const onRemoveFailed = (index: number) => {
+    if (inFlightRef.current) return;
+    const row = rows[index];
+    if (!row?.rowError) return;
+    const id = row.config.payment_request_id;
+    edited();
+    setRows((rs) => rs.map((r, i) => (i === index ? dismissFailedRow(r) : r)));
+    setRemovedIds((s) => new Set(s).add(id));
+    if (resultSent) {
+      const result = removeFailedId(resultSent.result, id);
+      setResultSent({ sent: resultSent.sent, result });
+      setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(result, resultSent.sent.request) }));
+    }
   };
 
   const onCancel = async () => {
@@ -111,67 +295,84 @@ export function NewPaymentClient() {
     router.push(buildUrl("/payments"));
   };
 
-  // TODO(next step): submit flow — single-flight POST /api/rdash/payment-entries/bulk
-  // (buildSubmitRequest), result panel (created / failed, "₹X recorded, ₹Y NOT
-  // recorded"), rowError on failed rows, Retry failed (buildRetryRequest), refetch.
-  const onSubmit = () => {};
-
-  const showErrors = dirty;
   const headerErrors = Object.fromEntries(
     Object.entries(validation.errors.header).filter(([f]) => touched.has(f as keyof PaymentHeaderValue)),
   );
+  const preview = current ? { label: "will be sent", sent: current } : lastSent ? { label: "last sent", sent: lastSent } : null;
 
   return (
     <>
       <PageHeader title="Bulk payment entry" actions={<span className="text-xs font-medium text-gray-500">Currency: INR</span>} />
       <main className="flex flex-1 flex-col gap-4 p-6 pb-24">
-        <PaymentHeader value={header} errors={headerErrors} onChange={setHeaderField} />
-        <SummaryCards totals={totals} loaded={load.status === "ready"} />
+        {/* Disabled while a submit is in flight — no edits can race the response. */}
+        <fieldset disabled={submitting !== null} aria-busy={submitting !== null} className="flex min-w-0 flex-col gap-4">
+          <PaymentHeader value={header} errors={headerErrors} onChange={setHeaderField} />
+          <SummaryCards totals={totals} loaded={load.status === "ready"} />
 
-        <section aria-label="Payment due" className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-900">
-              Payment due
-              <span className="ml-1 font-normal text-gray-500">
-                · {totals.selectedCount} of {rows.length} selected
-              </span>
-            </h2>
-            <button
-              type="button"
-              disabled={load.status !== "ready" || totals.selectedCount === 0}
-              onClick={() => {
-                setDirty(true);
-                setRows((r) => clearAppliedAmounts(r));
-              }}
-              className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
-            >
-              Clear applied amount
-            </button>
-          </div>
+          <section aria-label="Payment due" className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900">
+                Payment due
+                <span className="ml-1 font-normal text-gray-500">
+                  · {totals.selectedCount} of {rows.length} selected
+                </span>
+              </h2>
+              <button
+                type="button"
+                disabled={load.status !== "ready" || totals.selectedCount === 0}
+                onClick={() => {
+                  if (inFlightRef.current) return;
+                  edited();
+                  setRows((r) => clearAppliedAmounts(r));
+                }}
+                className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+              >
+                Clear applied amount
+              </button>
+            </div>
 
-          {load.status === "loading" && <TableSkeleton />}
-          {load.status === "error" && <LoadError message={load.message} onRetry={() => void loadRows()} />}
-          {load.status === "ready" && rows.length === 0 && <EmptyState />}
-          {load.status === "ready" && rows.length > 0 && (
-            <AllocationTable
-              rows={rows}
-              rowErrors={validation.errors.rows}
-              onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
-              onPayInFull={(i) => updateRow(i, payInFull)}
-              onRemark={(i, v) => updateRow(i, (r) => setRowRemark(r, v))}
-            />
-          )}
-        </section>
+            {load.status === "loading" && <TableSkeleton />}
+            {load.status === "error" && <LoadError message={load.message} onRetry={() => void loadRows()} />}
+            {load.status === "ready" && rows.length === 0 && <EmptyState />}
+            {load.status === "ready" && rows.length > 0 && (
+              <AllocationTable
+                rows={rows}
+                rowErrors={rowErrors}
+                onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
+                onPayInFull={(i) => updateRow(i, payInFull)}
+                onRemark={(i, v) => updateRow(i, (r) => setRowRemark(r, v))}
+                onRemove={onRemoveFailed}
+              />
+            )}
+          </section>
 
-        {load.status === "ready" && rows.length > 0 && showErrors ? <ValidationList items={validation.summary} /> : null}
-        {dataSource === "mock" && entries ? <PayloadPreview entries={entries} /> : null}
+          {load.status === "ready" && rows.length > 0 && dirty ? <ValidationList items={validation.summary} /> : null}
+        </fieldset>
+
+        {refreshError ? (
+          <LoadError message={refreshError} onRetry={() => void refreshAfter(null, false)} />
+        ) : null}
+        {outcome ? (
+          <SubmitResult
+            outcome={outcome}
+            retrying={submitting === "retry"}
+            busy={submitting !== null}
+            canRetry={(resultSent?.result.failed.length ?? 0) > 0}
+            removed={removedIds}
+            onRetryFailed={onRetryFailed}
+          />
+        ) : null}
+        {dataSource === "mock" && preview ? (
+          <PayloadPreview label={preview.label} request={preview.sent.request} entries={preview.sent.entries} />
+        ) : null}
       </main>
 
       <div className="sticky bottom-0 z-10 flex items-center gap-2 border-t border-gray-200 bg-white px-6 py-3">
-        <Button size="sm" className="h-9 px-4" disabled={!validation.ok} onClick={onSubmit}>
-          Submit payments
+        <Button size="sm" className="h-9 gap-1.5 px-4" disabled={!validation.ok || submitting !== null} onClick={onSubmit}>
+          {submitting === "submit" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {submitting === "submit" ? "Submitting…" : "Submit payments"}
         </Button>
-        <Button size="sm" variant="outline" className="h-9 px-4" onClick={() => void onCancel()}>
+        <Button size="sm" variant="outline" className="h-9 px-4" disabled={submitting !== null} onClick={() => void onCancel()}>
           Cancel
         </Button>
       </div>

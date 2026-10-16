@@ -265,3 +265,89 @@ describe("format", () => {
     expect(textOrDash("")).toBe("—");
   });
 });
+
+describe("submit flow helpers", () => {
+  it("merge after partial failure: created cleared, failed keep amount+remark+error, others keep edits, paid-off rows drop", async () => {
+    const { mergeRowsAfterSubmit } = await import("@/lib/payments/submit");
+    const prev = [
+      row("a", 100, "100", { remark: "ra", remarkOverridden: true }),
+      row("b", 50, "50", { remark: "H" }),
+      row("c", 70, "20", { remark: "rc", remarkOverridden: true }),
+      row("d", 10, "", { remark: "H" }),
+    ];
+    const fresh = [row("b", 50), row("c", 50), row("d", 10)]; // "a" paid off → hidden
+    const result: BulkSubmitResult = {
+      count: 2,
+      created: [{ id: "e1", payment_request_id: "a" }, { id: "e2", payment_request_id: "c" }],
+      failed: [{ payment_request_id: "b", error: "Rejected" }],
+      recordedAmount: 120,
+      notRecordedAmount: 50,
+    };
+    const out = mergeRowsAfterSubmit(prev, fresh, result);
+    expect(out.map((r) => r.config.payment_request_id)).toEqual(["b", "c", "d"]);
+    expect(out[0]).toMatchObject({ amount: "50", remark: "H", rowStatus: "failed", rowError: "Rejected" });
+    expect(out[1]).toMatchObject({ amount: "", remark: "rc", remarkOverridden: true, rowStatus: "created", rowError: null });
+    expect(out[1].config.payment_due).toBe(50); // fresh due
+    expect(out[2]).toMatchObject({ amount: "", remark: "H", rowStatus: "idle" });
+  });
+
+  it("merge with no result (rejected) keeps every row's state", async () => {
+    const { mergeRowsAfterSubmit } = await import("@/lib/payments/submit");
+    const prev = [row("a", 100, "120", { remark: "x", remarkOverridden: true })];
+    expect(mergeRowsAfterSubmit(prev, [row("a", 100)], null)[0]).toMatchObject({ amount: "120", remark: "x", remarkOverridden: true });
+  });
+
+  it("server 400 row errors map from sent index to table index", async () => {
+    const { mapServerRowErrors } = await import("@/lib/payments/submit");
+    const rows = [row("a", 1), row("b", 1), row("c", 1)];
+    const request = { header: header("2"), rows: [{ payment_request_id: "c", amount: "1", remark: null }, { payment_request_id: "a", amount: "1", remark: null }] };
+    const mapped = mapServerRowErrors(request, { form: [], header: {}, rows: { 0: { amount: "Amount is more than the payment due" } } }, rows);
+    expect(mapped).toEqual({ 2: "Amount is more than the payment due" });
+  });
+
+  it("shape guards", async () => {
+    const { isBulkSubmitResult, isValidationRejection } = await import("@/lib/payments/submit");
+    expect(isBulkSubmitResult({ count: 0, created: [], failed: [], recordedAmount: 0, notRecordedAmount: 0 })).toBe(true);
+    expect(isBulkSubmitResult({ created: [], failed: [] })).toBe(false);
+    expect(isValidationRejection({ error: "x", fieldErrors: { form: [], header: {}, rows: {} }, summary: [] })).toBe(true);
+    expect(isValidationRejection({ error: "x" })).toBe(false);
+  });
+});
+
+describe("Remove a failed row", () => {
+  it("dismissFailedRow: clears amount + rowError, unlocks, keeps remark; non-failed rows untouched", async () => {
+    const { dismissFailedRow, isAmountEditable } = await import("@/lib/payments/allocation");
+    const failed = row("a", 100, "40", { rowStatus: "failed", rowError: "Rejected", remark: "keep me", remarkOverridden: true });
+    expect(isAmountEditable(failed)).toBe(false);
+    const out = dismissFailedRow(failed);
+    expect(out).toMatchObject({ amount: "", rowError: null, rowStatus: "idle", remark: "keep me", remarkOverridden: true });
+    expect(isAmountEditable(out)).toBe(true);
+    const ok = row("b", 100, "10");
+    expect(dismissFailedRow(ok)).toBe(ok);
+  });
+
+  it("removeFailedId: Retry failed no longer includes the removed id; Amount paid follows what's left", async () => {
+    const { removeFailedId, retryAmountPaid } = await import("@/lib/payments/retry");
+    const previous = {
+      header: header("85"),
+      rows: [
+        { payment_request_id: "a", amount: "40", remark: null },
+        { payment_request_id: "b", amount: "45", remark: null },
+      ],
+    };
+    const result: BulkSubmitResult = {
+      count: 0,
+      created: [],
+      failed: [{ payment_request_id: "a", error: "x" }, { payment_request_id: "b", error: "y" }],
+      recordedAmount: 0,
+      notRecordedAmount: 85,
+    };
+    const afterA = removeFailedId(result, "a");
+    expect(buildRetryRequest(afterA, previous).rows.map((r) => r.payment_request_id)).toEqual(["b"]);
+    expect(retryAmountPaid(afterA, previous)).toBe("45");
+    expect(afterA.notRecordedAmount).toBe(85); // reported outcome unchanged
+    const none = removeFailedId(afterA, "b");
+    expect(buildRetryRequest(none, previous).rows).toEqual([]);
+    expect(retryAmountPaid(none, previous)).toBe("");
+  });
+});

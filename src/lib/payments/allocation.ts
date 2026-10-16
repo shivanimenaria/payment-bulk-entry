@@ -27,3 +27,12 @@ export function payInFull(row: AllocationRow): AllocationRow {
 export function clearAppliedAmounts(rows: AllocationRow[]): AllocationRow[] {
   return rows.map((r) => (isAmountEditable(r) && r.amount !== "" ? { ...r, amount: "" } : r));
 }
+
+/** Remove a failed (rowError) row from the pending payment: amount cleared,
+ *  error cleared, editable again; the remark (and its override flag) is kept.
+ *  Pair with removeFailedId (retry.ts) so Retry failed no longer sends it.
+ *  Rows without rowError are returned unchanged. */
+export function dismissFailedRow(row: AllocationRow): AllocationRow {
+  if (!row.rowError) return row;
+  return { ...row, amount: "", rowError: null, rowStatus: "idle" };
+}
