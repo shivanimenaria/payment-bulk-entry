@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { History, Plus } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/shell/PageHeader";
+import { ExpenseIcon } from "@/components/rd/ExpenseIcon";
+import { rdButtonPrimary, rdCard } from "@/components/rd/styles";
 import { useSession } from "@/lib/auth-context";
 
 // Payments list. TODO: rDash has no API to list past payment entries yet
@@ -15,24 +15,18 @@ export default function PaymentsPage() {
   return (
     <>
       <PageHeader
-        title="Bulk payment entry"
         actions={
-          <Button asChild size="sm" className="h-8 gap-1.5 px-3">
-            <Link href={buildUrl("/payments/new")}>
-              <Plus className="h-4 w-4" />
-              New Payment
-            </Link>
-          </Button>
+          <Link href={buildUrl("/payments/new")} className={rdButtonPrimary}>
+            + New Payment
+          </Link>
         }
       />
-      <main className="flex-1 p-6">
-        <section className="flex flex-col items-center justify-center rounded-lg border border-gray-200 bg-white px-6 py-16 text-center">
-          <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-500">
-            <History className="h-5 w-5" />
-          </div>
-          <p className="text-sm font-medium text-gray-900">Payment history will appear here</p>
-          <p className="mt-1 max-w-sm text-xs text-gray-500">
-            Record a payment for this vendor with <span className="font-medium text-gray-700">New Payment</span>.
+      <main className="flex-1 p-5">
+        <section className={`${rdCard} flex min-h-[420px] flex-col items-center justify-center gap-5 text-center text-rd-disabled`}>
+          <ExpenseIcon size={90} />
+          <p className="text-[24px] font-semibold">Payment history will appear here</p>
+          <p className="text-[14px] text-rd-muted">
+            Record a payment for this vendor with <span className="font-semibold text-rd-text">New Payment</span>.
           </p>
         </section>
       </main>

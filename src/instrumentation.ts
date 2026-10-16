@@ -1,13 +1,20 @@
 // Runs once when the server starts (Node and Edge runtimes). Fails fast on
 // invalid security-relevant configuration instead of at the first request.
 // Not run by `next build`, so builds don't need runtime secrets.
-import { validateRuntimeConfig, resolveTempProjectId } from "@/lib/runtime-config";
+import { validateRuntimeConfig, resolveTempProjectId, resolveAuthMode, devStaticTokenConfig } from "@/lib/runtime-config";
 
 export async function register() {
   try {
     const dataSource = validateRuntimeConfig(process.env);
     if (dataSource === "mock") {
       console.warn(`[startup] RDASH_DATA_SOURCE=mock (runtime: ${process.env.NEXT_RUNTIME}) — auth is bypassed and data is mocked`);
+    }
+    // Dev static-token mode: loud warning (never the token itself).
+    if (resolveAuthMode(process.env) === "static_token") {
+      const dev = devStaticTokenConfig(process.env);
+      console.warn(
+        `[startup] RDASH_AUTH_MODE=static_token (runtime: ${process.env.NEXT_RUNTIME}) — DEV ONLY: real rDash data with a static token, no handover, no refresh; vendor ${dev.vendorId}; writes ${dev.allowWrites ? "ENABLED" : "disabled"}`,
+      );
     }
     // TODO(remove-temp-project-id): warn on every startup while it is set.
     if (resolveTempProjectId(process.env)) {

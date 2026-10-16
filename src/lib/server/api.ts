@@ -2,7 +2,33 @@ import "server-only";
 import { decodeRdashIdSafe } from "./rdash-id";
 import { refreshAuthForRequest, AuthError, getRequestLogContext, getOutboundContextHeaders } from "./auth";
 import { requireEnv } from "./env";
+import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
 import type { ApiResponse, RdashVendor } from "@/types/rdash";
+
+/** DEV static-token mode: rDash rejected the static token (401). Never
+ *  refreshed — the dev token must be replaced. */
+export class DevTokenInvalidError extends Error {
+  constructor() {
+    super("dev token invalid");
+    this.name = "DevTokenInvalidError";
+  }
+}
+
+const isStaticTokenMode = () => resolveAuthMode(process.env) === "static_token";
+
+/** Authorization header value: `Bearer <token>` normally; in DEV static-token
+ *  mode `<RDASH_DEV_AUTH_SCHEME> <token>`. The token is never logged. */
+export function rdashAuthHeader(token: string): string {
+  if (isStaticTokenMode()) return `${devStaticTokenConfig(process.env).scheme} ${token}`;
+  return `Bearer ${token}`;
+}
+
+/** 401 in DEV static-token mode: no refresh (there is no session to refresh). */
+function failIfStaticToken401(where: string, path: string): void {
+  if (!isStaticTokenMode()) return;
+  console.warn(`[${where}] rDash 401 in dev static-token mode — not refreshing (dev token invalid)`, { path });
+  throw new DevTokenInvalidError();
+}
 
 /** An rDash `id` that isn't a hashid decodable with the PBE salt. */
 export class RdashIdDecodeError extends Error {
@@ -124,13 +150,14 @@ export async function rdashFetchWithRetry(
   const build = (t: string): RequestInit => ({
     ...init,
     headers: {
-      Authorization: `Bearer ${t}`,
+      Authorization: rdashAuthHeader(t),
       ...ctxHeaders,
       ...(init?.headers || {}),
     },
   });
   let res = await fetch(url, build(accessToken));
   if (res.status === 401) {
+    failIfStaticToken401("rdashFetchWithRetry", url);
     const peek = await res.clone().text().catch(() => "");
     console.warn(
       "[rdashFetchWithRetry] 401 — attempting token refresh:",
@@ -179,7 +206,7 @@ async function rdashFetchOnce(path: string, token: string, options?: RequestInit
   return fetch(`${requireEnv("RDASH_API_URL")}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: rdashAuthHeader(token),
       "Content-Type": "application/json",
       ...(await getOutboundContextHeaders()),
       ...options?.headers,
@@ -200,6 +227,7 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
   let res = await rdashFetchOnce(path, token, options);
 
   if (res.status === 401) {
+    failIfStaticToken401("apiFetch", path);
     const peek = await res.clone().text().catch(() => "");
     console.warn(
       "[apiFetch] 401 — attempting token refresh:",
@@ -248,11 +276,8 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
 //   { success, data: [...] }                 (flat)
 //   { success, data: { data: [...], ... } }  (nested, e.g. /v2/vendors)
 //
-// `opts.untilCount`: for paginated entities shaped `{ count, data: [...] }`
-// (e.g. the payment-request config). Pages until `count` items are collected,
-// advancing `offset` by the items actually received (robust to a server-side
-// limit cap). A missing `count`, an empty page before `count` is reached, or
-// running out of pages throws RdashResponseShapeError — never a partial list.
+// DRF-paginated endpoints (`{ count, next, previous, results }`, e.g. the
+// payment-request config) use paginateRdashDrf below instead.
 // `opts.noRefresh`: on 401, throw AuthError instead of refreshing. Required
 // when `token` is NOT the request cookie's token (e.g. /api/session verifying
 // a just-issued handover token): refreshAuthForRequest refreshes whatever
@@ -260,13 +285,12 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
 export async function paginateRdash<T>(
   path: string,
   token: string,
-  opts?: { noRefresh?: boolean; untilCount?: boolean },
+  opts?: { noRefresh?: boolean },
 ): Promise<T[]> {
   const PAGE = 200;
   // Hard cap on requests per call. Reaching it without a normal stop throws
   // RdashResponseShapeError — never a silently truncated list.
   const MAX_PAGES = 200;
-  let total: number | null = null;
   const out: T[] = [];
   // ID dedup across pages — see the "rDash ignores pagination" comment below.
   const seen = new Set<string>();
@@ -282,8 +306,9 @@ export async function paginateRdash<T>(
   let currentToken = token;
   for (let i = 0; i < MAX_PAGES; i++) {
     const url = `${requireEnv("RDASH_API_URL")}${path}${sep}limit=${PAGE}&offset=${offset}`;
-    let res = await fetch(url, { headers: { Authorization: `Bearer ${currentToken}`, ...ctxHeaders } });
+    let res = await fetch(url, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
 
+    if (res.status === 401) failIfStaticToken401("paginateRdash", path);
     if (res.status === 401 && opts?.noRefresh) {
       console.warn("[paginateRdash] 401 with refresh disabled", { path });
       throw new AuthError("Session expired");
@@ -299,7 +324,7 @@ export async function paginateRdash<T>(
       const outcome = await refreshAuthForRequest();
       if (outcome.kind === "ok") {
         currentToken = outcome.payload.accessToken;
-        res = await fetch(url, { headers: { Authorization: `Bearer ${currentToken}`, ...ctxHeaders } });
+        res = await fetch(url, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
         if (res.status === 401) {
           throw new AuthError("Session expired");
         }
@@ -335,29 +360,6 @@ export async function paginateRdash<T>(
       });
       throw new RdashResponseShapeError(path);
     }
-    if (opts?.untilCount) {
-      // TODO(verify): config page envelope is `{ data: { count, data: [...] } }`
-      // with `count` = total matching items (docs/api-notes.md → #2).
-      const count = root && !Array.isArray(root) ? (root as { count?: unknown }).count : undefined;
-      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
-        console.error("[paginateRdash] untilCount: missing/invalid count", { path, offset });
-        throw new RdashResponseShapeError(path);
-      }
-      total = count;
-      for (const item of page) out.push(item);
-      if (out.length >= total) return out;
-      if (page.length === 0) {
-        console.error("[paginateRdash] untilCount: empty page before count reached", {
-          path,
-          offset,
-          collected: out.length,
-          count: total,
-        });
-        throw new RdashResponseShapeError(path);
-      }
-      offset += page.length;
-      continue;
-    }
     // Defensive dedup: some rDash list endpoints ignore `limit`/`offset` and
     // return the full set on every call. Without this, the loop pushes the
     // same items up to 200 times and downstream callers see 75k "elements"
@@ -386,15 +388,99 @@ export async function paginateRdash<T>(
     }
     offset += PAGE;
   }
-  // Only reachable when MAX_PAGES requests never hit a normal stop (or never
-  // reached `count`): the list is incomplete → error, never a partial list.
-  console.error("[paginateRdash] page cap hit before the list ended", {
-    path,
-    maxPages: MAX_PAGES,
-    collected: out.length,
-    count: opts?.untilCount ? total : undefined,
-  });
+  // Only reachable when MAX_PAGES requests never hit a normal stop: the list
+  // is incomplete → error, never a partial list.
+  console.error("[paginateRdash] page cap hit before the list ended", { path, maxPages: MAX_PAGES, collected: out.length });
   throw new RdashResponseShapeError(path);
+}
+
+// ============ DRF pagination (config) ============
+
+// Fetches every page of a DRF-paginated rDash list. Real shape (captured from
+// production, tests/fixtures/real-config-page.json):
+//   { success, data: { count, next, previous, results: [...] } }
+// The first request asks for limit=200&offset=0; after that `next` is
+// followed exactly as rDash returns it, until it is null. Fail closed — any of
+// these throws RdashResponseShapeError (never a partial or guessed list):
+//   - missing/invalid `count`, `results` not an array, `next` not string|null
+//   - `count` changing between pages
+//   - `next` on a different origin or path than RDASH_API_URL + `path`
+//     (the user's token is never sent anywhere else)
+//   - an empty page while `next` is still set, or the page cap reached
+//   - total collected ≠ `count` when `next` becomes null
+// 401: refresh-once like apiFetch (never in dev static-token mode; never with
+// opts.noRefresh). 403 → RdashPermissionError.
+export async function paginateRdashDrf<T>(path: string, token: string, opts?: { noRefresh?: boolean }): Promise<T[]> {
+  const PAGE = 200;
+  const MAX_PAGES = 200;
+  const base = requireEnv("RDASH_API_URL");
+  const sep = path.includes("?") ? "&" : "?";
+  const first = new URL(`${base}${path}${sep}limit=${PAGE}&offset=0`);
+  const ctxHeaders = await getOutboundContextHeaders();
+  let currentToken = token;
+  let count: number | null = null;
+  const out: T[] = [];
+  let url: string | null = first.toString();
+
+  const shapeError = (detail: Record<string, unknown>): never => {
+    console.error("[paginateRdashDrf] unexpected response", { path, ...detail });
+    throw new RdashResponseShapeError(path);
+  };
+
+  for (let i = 0; url; i++) {
+    if (i >= MAX_PAGES) shapeError({ reason: "page cap reached", collected: out.length, count });
+    const pageUrl: string = url;
+    let res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
+    if (res.status === 401) {
+      failIfStaticToken401("paginateRdashDrf", path);
+      if (opts?.noRefresh) throw new AuthError("Session expired");
+      console.warn("[paginateRdashDrf] 401 — attempting token refresh:", path, await getRequestLogContext());
+      const outcome = await refreshAuthForRequest();
+      if (outcome.kind !== "ok") throw new AuthError("Session expired");
+      currentToken = outcome.payload.accessToken;
+      res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
+      if (res.status === 401) throw new AuthError("Session expired");
+    }
+    if (!res.ok) {
+      if (res.status === 403) {
+        const body = await res.clone().text().catch(() => "");
+        console.error("[paginateRdashDrf 403]", path, body.slice(0, 300));
+        throw new RdashPermissionError();
+      }
+      const body = await res.text().catch(() => "");
+      console.error("[paginateRdashDrf] failed:", path, res.status, body.slice(0, 300));
+      throw new RdashUpstreamError(res.status);
+    }
+    const json = await res.json().catch(() => null);
+    if (!json || json.success === false) shapeError({ reason: "success=false or not JSON", page: i });
+    const root = json.data;
+    const pageCount = root?.count;
+    const results = root?.results;
+    const next = root?.next;
+    if (!Number.isInteger(pageCount) || pageCount < 0) shapeError({ reason: "invalid count", page: i });
+    if (!Array.isArray(results)) shapeError({ reason: "results not an array", page: i, keys: root && typeof root === "object" ? Object.keys(root) : typeof root });
+    if (next !== null && typeof next !== "string") shapeError({ reason: "invalid next", page: i });
+    if (count === null) count = pageCount;
+    else if (pageCount !== count) shapeError({ reason: "count changed between pages", page: i, count, pageCount });
+    for (const item of results as T[]) out.push(item);
+    if (next) {
+      if ((results as T[]).length === 0) shapeError({ reason: "empty page with next", page: i });
+      let nextUrl: URL;
+      try {
+        nextUrl = new URL(next);
+      } catch {
+        return shapeError({ reason: "next is not a URL", page: i });
+      }
+      if (nextUrl.origin !== first.origin || nextUrl.pathname !== first.pathname) {
+        shapeError({ reason: "next points outside RDASH_API_URL/path", page: i, nextOrigin: nextUrl.origin });
+      }
+      url = nextUrl.toString();
+    } else {
+      url = null;
+    }
+  }
+  if (out.length !== count) shapeError({ reason: "total does not match count", collected: out.length, count });
+  return out;
 }
 
 // ============ Vendors (org-level) ============

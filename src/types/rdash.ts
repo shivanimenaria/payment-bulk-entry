@@ -5,8 +5,14 @@
 // ID convention: payment-flow ids (project id, payment_request_id, …) are
 // kept exactly as rDash returns them (opaque strings) and sent back
 // unchanged; only the session vendor id is re-encoded (it is stored decoded).
-// TODO(verify): numeric fields are JSON numbers, not decimal strings, and
-// date/time fields are ISO-8601 strings (docs/api-notes.md → #8).
+//
+// Money: rDash sends DECIMAL STRINGS with up to 4 decimals ("29500.0000",
+// "0"). Always parse with lib/payments/money.ts parseRdashAmount — never
+// Number()/parseFloat (confirmed from a real production response,
+// tests/fixtures/real-config-page.json).
+
+/** Decimal string, up to 4 decimals, e.g. "29500.0000". */
+export type RdashDecimal = string;
 
 // Standard rDash response envelope.
 export interface ApiResponse<T> {
@@ -35,25 +41,39 @@ export interface RdashProject {
   is_deleted: boolean;
 }
 
+// Currency object on config items (real response).
+export interface RdashCurrency {
+  id: string | null;
+  name: string;
+  symbol: string;
+  code: string;
+  locale?: string;
+}
+
 // GET /v2/vendor-payment-requests/config/ — PaginatedVendorPaymentRequestConfigOutputEntity
 export interface VendorPaymentRequestConfigItem {
   payment_request_id: string;
+  /** rDash PAYMENT_REQUEST_STATUS value (seen: approved, pending, submitted, cancelled). */
   status: string;
-  request_amount: number;
-  paid_amount: number;
-  payment_due: number;
-  // TODO(verify): currency object shape is not in Swagger (docs/api-notes.md → #9).
-  currency: Record<string, unknown>;
-  // TODO(verify): requested from rDash, not in Swagger yet. Without it the
-  // details API (needs project_id in the path) can't be called for the row
-  // → detailsUnavailable. Never guessed or defaulted (docs/api-notes.md → #10).
-  project_id?: string;
+  request_amount: RdashDecimal;
+  paid_amount: RdashDecimal;
+  payment_due: RdashDecimal;
+  currency: RdashCurrency;
+  // Required in the corrected Swagger. Still checked at runtime: a missing
+  // value → detailsUnavailable, never guessed (RDASH_TEMP_PROJECT_ID covered
+  // the gap and is no longer needed — remove).
+  project_id: string;
 }
 
-export interface PaginatedVendorPaymentRequestConfig {
+/** DRF pagination envelope (inside the standard `{ success, data }`). */
+export interface DrfPage<T> {
   count: number;
-  data: VendorPaymentRequestConfigItem[];
+  next: string | null;
+  previous: string | null;
+  results: T[];
 }
+
+export type PaginatedVendorPaymentRequestConfig = DrfPage<VendorPaymentRequestConfigItem>;
 
 export interface RdashIdName {
   id: string;
@@ -73,22 +93,29 @@ export interface PaymentRequestDetails {
   vendor: RdashIdName;
   client: RdashIdName;
   request_type: string;
-  // TODO(verify): Swagger names the field but not its shape — assumed a
-  // display string, may be a user object (docs/api-notes.md → #11).
-  requested_by: string;
+  requested_by: RdashIdName | null;
   requested_at: string;
   invoice: RdashIdNumber | null;
   purchase_order: RdashIdNumber | null;
-  request_amount_without_tax: number;
-  tax_amount: number;
-  total_request_amount: number;
-  paid_till_date: number;
-  payment_due: number;
+  // Swagger says number; real responses may use decimal strings — parse with
+  // parseRdashAmount either way.
+  request_amount_without_tax: RdashDecimal | number;
+  tax_amount: RdashDecimal | number;
+  total_request_amount: RdashDecimal | number;
+  paid_till_date: RdashDecimal | number;
+  payment_due: RdashDecimal | number;
   remark: string | null;
   due_date: string | null;
   request_status: string;
-  // TODO(verify): attachment item shape not in Swagger (docs/api-notes.md → #11).
-  attachments: unknown[];
+  attachments: RdashAttachment[];
+}
+
+export interface RdashAttachment {
+  id: string;
+  file: string;
+  name: string;
+  uploaded_by: RdashIdName;
+  uploaded_at: string;
 }
 
 export type PaymentMode = "bank_transfer" | "cheque" | "cash" | "upi";
@@ -96,9 +123,10 @@ export type PaymentMode = "bank_transfer" | "cheque" | "cash" | "upi";
 // POST /v2/vendor-payment-requests/payment-entries/bulk/ — ExternalBulkPaymentEntryCreateInputEntity
 export interface BulkPaymentEntryInput {
   payment_request_id: string;
+  /** number($float) — the validated amount, at most 2 decimals. */
   amount: number;
   payment_mode: PaymentMode;
-  // TODO(verify): date format assumed "YYYY-MM-DD" (docs/api-notes.md → #8).
+  /** "YYYY-MM-DD" (confirmed). */
   payment_date: string;
   transaction_id: string | null;
   transaction_proof_file_url: string | null;
@@ -118,12 +146,11 @@ export interface BulkPaymentEntryCreated {
 
 export interface BulkPaymentEntryFailed {
   payment_request_id: string;
-  // TODO(verify): assumed a message string (docs/api-notes.md → #12).
   error: string;
 }
 
+// Confirmed by the corrected Swagger.
 export interface BulkPaymentEntryCreateOutput {
-  // TODO(verify): assumed = number of created entries (docs/api-notes.md → #12).
   count: number;
   created: BulkPaymentEntryCreated[];
   failed: BulkPaymentEntryFailed[];

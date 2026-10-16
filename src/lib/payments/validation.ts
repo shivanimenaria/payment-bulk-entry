@@ -10,7 +10,9 @@
 import type { PaymentMode, VendorPaymentRequestConfigItem } from "@/types/rdash";
 import type { AllocationRow, PaymentHeader } from "@/types/payments";
 import { computeTotals } from "./totals";
-import { toPaise, rowAmountPaise } from "./money";
+import { toPaise, rowAmountPaise, parseRdashAmount, rdashPaise } from "./money";
+import { AMOUNT_INVALID_MESSAGE, AMOUNT_TOO_LARGE_MESSAGE, rowAmountIssue } from "./allocation";
+import { isPayableStatus } from "./payable";
 
 // Money helpers live in money.ts (shared with totals.ts); re-exported so
 // existing imports from "validation" keep working.
@@ -30,6 +32,9 @@ export const MESSAGES = {
   duplicateRequest: "Duplicate payment request",
   unknownRequest: "Unknown payment request for this vendor",
   nothingDue: "Nothing is due on this payment request",
+  notPayableStatus: "This payment request can't be paid in its current status",
+  amountTooLarge: AMOUNT_TOO_LARGE_MESSAGE,
+  amountInvalid: AMOUNT_INVALID_MESSAGE,
   detailsUnavailable: "Details pending — this request can't be paid yet",
   detailsError: "Details could not be loaded — this request can't be paid",
   headerRequired: "Header is required",
@@ -183,11 +188,15 @@ export function validateAllocation(header: PaymentHeader, rows: AllocationRow[])
   const selected: ValidatedSubmission["rows"] = [];
   rows.forEach((row, i) => {
     const amountPaise = rowAmountPaise(row.amount);
-    const duePaise = toPaise(row.config.payment_due);
+    // rDash amounts are decimal strings ("29500.0000") — parsed exactly.
+    const duePaise = rdashPaise(row.config.payment_due);
     let msg = checkRowAmount(amountPaise, duePaise, { allowZero: true });
     if (!msg && amountPaise !== null && amountPaise > 0) {
-      if (row.detailsUnavailable) msg = MESSAGES.detailsUnavailable;
+      const issue = rowAmountIssue(row);
+      if (issue) msg = issue;
+      else if (row.detailsUnavailable) msg = MESSAGES.detailsUnavailable;
       else if (row.detailsError) msg = MESSAGES.detailsError;
+      else if (!isPayableStatus(row.config.status)) msg = MESSAGES.notPayableStatus;
       else if (duePaise === null || duePaise <= 0) msg = MESSAGES.nothingDue;
     }
     if (msg) {
@@ -263,8 +272,18 @@ export function validateSubmission(
         rowErr(i, "payment_request_id", MESSAGES.unknownRequest);
         rowOk = false;
       }
-      const duePaise = cfg ? toPaise(cfg.payment_due) : null;
-      if (cfg && (duePaise === null || duePaise <= 0)) {
+      if (cfg && !isPayableStatus(cfg.status)) {
+        rowErr(i, "payment_request_id", MESSAGES.notPayableStatus);
+        rowOk = false;
+      }
+      // Fresh rDash amount (decimal string) — exact paise or an explicit error.
+      const due = cfg ? parseRdashAmount(cfg.payment_due) : null;
+      const duePaise = due && due.ok ? due.paise : null;
+      const issue = cfg && isPayableStatus(cfg.status) ? rowAmountIssue({ config: cfg }) : null;
+      if (issue) {
+        rowErr(i, "payment_request_id", issue);
+        rowOk = false;
+      } else if (cfg && isPayableStatus(cfg.status) && (duePaise === null || duePaise <= 0)) {
         rowErr(i, "payment_request_id", MESSAGES.nothingDue);
         rowOk = false;
       }

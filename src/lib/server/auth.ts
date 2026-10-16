@@ -7,7 +7,7 @@ import { EncryptJWT, jwtDecrypt, SignJWT, importPKCS8 } from "jose";
 import { decodeRdashIdSafe } from "./rdash-id";
 import { requireEnv } from "./env";
 import { getDataSource } from "./rdash-source/mode";
-import { getCookieSecretKey } from "@/lib/runtime-config";
+import { devStaticTokenConfig, getCookieSecretKey, resolveAuthMode } from "@/lib/runtime-config";
 
 const FRESH_HEADER = "x-pbe-auth-fresh";
 
@@ -1110,15 +1110,37 @@ const MOCK_AUTH: AuthContext = {
   tabCode: "pbe",
 };
 
+// DEV static-token session (RDASH_AUTH_MODE=static_token, never production —
+// runtime-config enforces it). No handover, no cookie, no refresh. The vendor
+// is RDASH_DEV_VENDOR_ID exactly as given (rDash's own hashid — no PBE-salt
+// decode). The token is never logged.
+function devStaticSession(): AuthContext {
+  const dev = devStaticTokenConfig(process.env);
+  return {
+    accessToken: dev.token,
+    orgId: "",
+    projectId: "",
+    userId: "",
+    vendorId: dev.vendorId,
+    displayName: "Dev (static token)",
+    email: null,
+    tabCode: null,
+  };
+}
+
 export async function getSessionOrMock(
   request: NextRequest,
-): Promise<GetAuthResult & { mock: boolean }> {
+): Promise<GetAuthResult & { mock: boolean; dev: boolean }> {
   if (getDataSource() === "mock") {
     console.warn("[mock] auth bypassed", { path: request.nextUrl.pathname });
-    return { auth: { ...MOCK_AUTH }, mock: true };
+    return { auth: { ...MOCK_AUTH }, mock: true, dev: false };
+  }
+  if (resolveAuthMode(process.env) === "static_token") {
+    console.warn("[dev] static-token session (real rDash data)", { path: request.nextUrl.pathname });
+    return { auth: devStaticSession(), mock: false, dev: true };
   }
   const result = await getAuth(request);
-  return { ...result, mock: false };
+  return { ...result, mock: false, dev: false };
 }
 
 // ── Auth error class ────────────────────────────────────────

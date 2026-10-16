@@ -8,6 +8,7 @@ import type {
   VendorPaymentRequestConfigItem,
 } from "@/types/rdash";
 import type { RdashSource } from "./types";
+import { paiseToRdash, rdashPaise, toPaise } from "@/lib/payments/money";
 import projectsJson from "./mock-data/projects.json";
 import mockVendorConfigJson from "./mock-data/config.mock-vendor.json";
 import detailsJson from "./mock-data/details.json";
@@ -15,10 +16,11 @@ import detailsJson from "./mock-data/details.json";
 // RDASH_DATA_SOURCE=mock. Data comes from mock-data/*.json (strict Swagger
 // shapes). Only reachable through index.ts when mock mode is selected.
 //
-// Bulk creates mutate an in-process copy of the config/details so a refetch
-// after submit shows the reduced payment_due (resetMockState() restores the
-// fixtures). TODO(verify): project_id on config items exists in mock data only
-// (docs/api-notes.md → #10).
+// Bulk creates mutate an in-process copy of the config/details (kept on
+// globalThis — see store()) so a refetch after submit shows the reduced
+// payment_due (resetMockState() restores the fixtures). Fixtures use the real
+// rDash shapes: DRF page (results/next), decimal-string amounts, currency
+// object, requested_by { id, name }.
 
 const CONFIG_BY_VENDOR: Record<string, PaginatedVendorPaymentRequestConfig> = {
   "mock-vendor": mockVendorConfigJson as PaginatedVendorPaymentRequestConfig,
@@ -50,17 +52,29 @@ const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 function freshState(): State {
   return {
-    config: Object.fromEntries(Object.entries(CONFIG_BY_VENDOR).map(([v, page]) => [v, clone(page.data)])),
+    config: Object.fromEntries(Object.entries(CONFIG_BY_VENDOR).map(([v, page]) => [v, clone(page.results)])),
     details: clone(detailsJson as PaymentRequestDetails[]),
     nextEntryId: 1,
   };
 }
 
-let state = freshState();
+// One store per server PROCESS, on globalThis. In `next dev` each route can
+// get its own instance of this module (separate compilation per route), so a
+// module-level variable would give the bulk route and the payment-requests
+// route different copies — submitted entries would never show up on refetch.
+// Reset only on server restart (or resetMockState in tests).
+const STORE_KEY = "__pbeMockRdashState__";
+type GlobalWithStore = typeof globalThis & { [STORE_KEY]?: State };
+
+function store(): State {
+  const g = globalThis as GlobalWithStore;
+  if (!g[STORE_KEY]) g[STORE_KEY] = freshState();
+  return g[STORE_KEY];
+}
 
 /** Test helper: restore the JSON fixtures. */
 export function resetMockState(): void {
-  state = freshState();
+  (globalThis as GlobalWithStore)[STORE_KEY] = freshState();
 }
 
 // MOCK_FAIL_IDS: comma-separated payment_request_ids that always fail in bulk.
@@ -74,16 +88,13 @@ function mockFailIds(): Set<string> {
 }
 
 function findConfigItem(requestId: string): VendorPaymentRequestConfigItem | undefined {
-  for (const items of Object.values(state.config)) {
+  for (const items of Object.values(store().config)) {
     const hit = items.find((i) => i.payment_request_id === requestId);
     if (hit) return hit;
   }
   return undefined;
 }
 
-// Money arithmetic in paise to avoid float drift.
-const toPaise = (n: number) => Math.round(n * 100);
-const fromPaise = (p: number) => p / 100;
 
 export function createMockSource(): RdashSource {
   return {
@@ -92,7 +103,7 @@ export function createMockSource(): RdashSource {
     },
 
     async listPaymentRequestConfig(vendorId: string): Promise<VendorPaymentRequestConfigItem[]> {
-      const items = state.config[vendorId];
+      const items = store().config[vendorId];
       if (!items) throw new MockVendorNotFoundError(vendorId);
       return clone(items);
     },
@@ -100,7 +111,7 @@ export function createMockSource(): RdashSource {
     async getPaymentRequestDetails(projectId: string, requestId: string): Promise<PaymentRequestDetails> {
       const cfg = findConfigItem(requestId);
       if (!cfg || cfg.project_id !== projectId) throw new MockNotFoundError(`request ${requestId} in ${projectId}`);
-      const details = state.details.find((d) => d.id === requestId);
+      const details = store().details.find((d) => d.id === requestId);
       if (!details) throw new MockNotFoundError(`details ${requestId}`);
       return clone(details);
     },
@@ -122,18 +133,26 @@ export function createMockSource(): RdashSource {
           out.failed.push({ payment_request_id: entry.payment_request_id, error: "Invalid amount" });
           continue;
         }
-        if (toPaise(entry.amount) > toPaise(cfg.payment_due)) {
+        // rDash amounts are decimal strings; arithmetic in exact paise.
+        const amount = toPaise(entry.amount);
+        const due = rdashPaise(cfg.payment_due);
+        const paid = rdashPaise(cfg.paid_amount);
+        if (amount === null || due === null || paid === null) {
+          out.failed.push({ payment_request_id: entry.payment_request_id, error: "Invalid amount" });
+          continue;
+        }
+        if (amount > due) {
           out.failed.push({ payment_request_id: entry.payment_request_id, error: "Amount exceeds payment due" });
           continue;
         }
-        cfg.paid_amount = fromPaise(toPaise(cfg.paid_amount) + toPaise(entry.amount));
-        cfg.payment_due = fromPaise(toPaise(cfg.payment_due) - toPaise(entry.amount));
-        const details = state.details.find((d) => d.id === entry.payment_request_id);
+        cfg.paid_amount = paiseToRdash(paid + amount);
+        cfg.payment_due = paiseToRdash(due - amount);
+        const details = store().details.find((d) => d.id === entry.payment_request_id);
         if (details) {
           details.paid_till_date = cfg.paid_amount;
           details.payment_due = cfg.payment_due;
         }
-        out.created.push({ id: `mock-entry-${state.nextEntryId++}`, payment_request_id: entry.payment_request_id });
+        out.created.push({ id: `mock-entry-${store().nextEntryId++}`, payment_request_id: entry.payment_request_id });
       }
       out.count = out.created.length;
       return out;

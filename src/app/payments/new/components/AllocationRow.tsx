@@ -1,15 +1,27 @@
 "use client";
 
 import type { AllocationRow as Row } from "@/types/payments";
-import { isAmountEditable } from "@/lib/payments/allocation";
-import { DASH, formatAmount, formatDate, formatStatus, textOrDash } from "@/lib/format";
+import { isAmountEditable, rowAmountIssue } from "@/lib/payments/allocation";
+import { DASH, formatDate, formatRdashAmount, textOrDash } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { rdInputCls, rdStatusClass, rdTextLinkSm } from "@/components/rd/styles";
 
-const cell = "whitespace-nowrap px-3 py-2 align-top";
+// rDash row: font-size-14, p-20 (20px vertical; 10px column gap), border-b
+// #c7c8c9, black text; amounts right-aligned.
+const cell = "whitespace-nowrap px-[5px] py-5 align-top text-[14px] leading-[22px] text-rd-black";
 const num = "text-right tabular-nums";
 
 function Pending() {
-  return <span className="italic text-gray-400">Details pending</span>;
+  return <span className="italic text-rd-placeholder">Details pending</span>;
+}
+
+/** rDash toTitleCase: "partially_paid" → "Partially Paid". */
+function titleCase(value: string | null | undefined): string {
+  if (!value) return DASH;
+  return value
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export function AllocationRow({
@@ -34,14 +46,16 @@ export function AllocationRow({
   const editable = isAmountEditable(row);
   // Detail columns: pending (no project), failed (details error) or the value.
   const detail = (value: React.ReactNode) =>
-    row.detailsUnavailable ? <Pending /> : row.detailsError ? <span className="text-gray-400">{DASH}</span> : value;
-  const inlineError = row.rowError ?? row.detailsError ?? amountError ?? null;
+    row.detailsUnavailable ? <Pending /> : row.detailsError ? <span className="text-rd-placeholder">{DASH}</span> : value;
+  // An amount PBE can't process (too large / invalid) is always shown and
+  // locks the row (isAmountEditable).
+  const inlineError = rowAmountIssue(row) ?? row.rowError ?? row.detailsError ?? amountError ?? null;
 
   return (
-    <tr className={cn("border-b border-gray-100 last:border-0", row.rowError ? "bg-red-50/60" : "hover:bg-gray-50/60")}>
-      <td className={cn(cell, "text-gray-500")}>{index + 1}</td>
+    <tr className={cn("border-b border-rd-border last:border-0", row.rowError ? "bg-rd-row-error" : "bg-white")}>
+      <td className={cn(cell, "pl-5 text-center")}>{index + 1}.</td>
       <td className={cell}>{detail(formatDate(d?.requested_at))}</td>
-      <td className={cn(cell, "font-medium")}>{detail(textOrDash(d?.request_number))}</td>
+      <td className={cell}>{detail(textOrDash(d?.request_number))}</td>
       <td className={cell}>
         {row.detailsUnavailable ? (
           <Pending />
@@ -53,7 +67,7 @@ export function AllocationRow({
             {row.projectIdSource === "temporary" ? (
               <>
                 {" "}
-                <span className="text-[11px] font-medium text-amber-700" title="Project not confirmed by rDash (temporary workaround)">
+                <span className="text-[12px] font-semibold text-rd-pending" title="Project not confirmed by rDash (temporary workaround)">
                   (temporary)
                 </span>
               </>
@@ -63,15 +77,11 @@ export function AllocationRow({
       </td>
       <td className={cell}>{detail(textOrDash(d?.request_type))}</td>
       <td className={cell}>{detail(formatDate(d?.due_date))}</td>
-      <td className={cell}>{detail(textOrDash(d?.requested_by))}</td>
-      <td className={cell}>
-        <span className="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[11px] text-gray-700">
-          {formatStatus(row.config.status)}
-        </span>
-      </td>
-      <td className={cn(cell, num)}>{formatAmount(row.config.request_amount)}</td>
-      <td className={cn(cell, num, "font-medium")}>{formatAmount(row.config.payment_due)}</td>
-      <td className={cn(cell, "min-w-[180px]")}>
+      <td className={cell}>{detail(textOrDash(d?.requested_by?.name))}</td>
+      <td className={cn(cell, rdStatusClass(row.config.status))}>{titleCase(row.config.status)}</td>
+      <td className={cn(cell, num)}>{formatRdashAmount(row.config.request_amount)}</td>
+      <td className={cn(cell, num)}>{formatRdashAmount(row.config.payment_due)}</td>
+      <td className={cn(cell, "min-w-[190px]")}>
         <div className="flex items-center gap-2">
           <input
             aria-label={`Payment done, row ${index + 1}`}
@@ -79,42 +89,34 @@ export function AllocationRow({
             autoComplete="off"
             placeholder="0.00"
             disabled={!editable}
-            className={cn(
-              "h-8 w-28 rounded-md border border-gray-300 bg-white px-2 text-right text-sm tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500",
-              amountError && "border-red-400",
-            )}
+            className={rdInputCls(!!amountError, "w-28 text-right tabular-nums")}
             value={row.amount}
             onChange={(e) => onAmount(e.target.value)}
           />
-          <button
-            type="button"
-            disabled={!editable}
-            onClick={onPayInFull}
-            className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
-          >
+          <button type="button" disabled={!editable} onClick={onPayInFull} className={rdTextLinkSm}>
             Pay in full
           </button>
         </div>
-        {inlineError ? <p className="mt-1 max-w-[220px] whitespace-normal text-[11px] text-red-600">{inlineError}</p> : null}
+        {inlineError ? <p className="mt-1 max-w-[220px] whitespace-normal text-[12px] leading-[15px] text-rd-red">{inlineError}</p> : null}
+        {row.rowStatus === "created" && !inlineError ? (
+          <p className="mt-1 text-[12px] font-semibold leading-[15px] text-rd-approved">Recorded</p>
+        ) : null}
         {row.rowError ? (
           <button
             type="button"
             onClick={onRemove}
-            className="mt-1 text-[11px] font-medium text-gray-600 underline-offset-2 hover:text-gray-900 hover:underline"
+            className="mt-1 text-[12px] font-semibold text-rd-text underline-offset-2 hover:underline"
             title="Don't retry this request — clears its amount and unlocks the row"
           >
             Remove
           </button>
         ) : null}
-        {row.rowStatus === "created" && !inlineError ? (
-          <p className="mt-1 text-[11px] font-medium text-green-700">Recorded</p>
-        ) : null}
       </td>
-      <td className={cn(cell, "min-w-[200px]")}>
+      <td className={cn(cell, "min-w-[200px] pr-5")}>
         <input
           aria-label={`Remarks, row ${index + 1}`}
           autoComplete="off"
-          className="h-8 w-48 rounded-md border border-gray-300 bg-white px-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+          className={rdInputCls(false, "w-48")}
           value={row.remark}
           onChange={(e) => onRemark(e.target.value)}
         />

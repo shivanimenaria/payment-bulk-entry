@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionOrMock, withAuthCookies } from "@/lib/server/auth";
 import { getRdashSource } from "@/lib/server/rdash-source";
+import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
 import { safeJson } from "@/lib/server/respond-safe";
 import { rdashRouteError, withCookieHeader } from "@/lib/server/route-errors";
 import { validateSubmission, fromPaise } from "@/lib/payments/validation";
@@ -21,6 +22,12 @@ const ROUTE = "POST /api/rdash/payment-entries/bulk";
 //     is NOT called.
 //  3. Build entries, create in one bulk call, map created/failed to amounts.
 export const POST = withAuthCookies(async (request: NextRequest) => {
+  // DEV static-token mode: writes blocked unless RDASH_DEV_ALLOW_WRITES=true.
+  // Checked first — nothing is read from rDash either.
+  if (resolveAuthMode(process.env) === "static_token" && !devStaticTokenConfig(process.env).allowWrites) {
+    console.warn(`[${ROUTE}] blocked: writes disabled in dev static-token mode`);
+    return NextResponse.json({ error: "Writes disabled in dev static-token mode" }, { status: 403 });
+  }
   let body: { header?: unknown; rows?: unknown };
   try {
     const parsed: unknown = await request.json();

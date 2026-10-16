@@ -1,7 +1,7 @@
 import "server-only";
 import { NextResponse } from "next/server";
 import { AuthError, authErrorResponse } from "./auth";
-import { RdashPermissionError } from "./api";
+import { DevTokenInvalidError, RdashPermissionError } from "./api";
 
 export const PERMISSION_MESSAGE = "You do not have access to perform this action";
 export const UPSTREAM_MESSAGE = "Could not load data from rDash. Please try again.";
@@ -13,6 +13,12 @@ export const UPSTREAM_MESSAGE = "Could not load data from rDash. Please try agai
 // Never an empty list / fake success.
 export function rdashRouteError(err: unknown, route: string): NextResponse {
   if (err instanceof AuthError) return authErrorResponse(err);
+  // DEV static-token mode only. Not a 401: that would send the browser into
+  // the iframe re-handover flow, which doesn't exist in this mode.
+  if (err instanceof DevTokenInvalidError) {
+    console.error(`[${route}] dev token invalid (rDash 401) — replace RDASH_DEV_API_TOKEN`);
+    return NextResponse.json({ error: "Dev token rejected by rDash (401)." }, { status: 502 });
+  }
   if (err instanceof RdashPermissionError) {
     return NextResponse.json({ error: PERMISSION_MESSAGE }, { status: 403 });
   }

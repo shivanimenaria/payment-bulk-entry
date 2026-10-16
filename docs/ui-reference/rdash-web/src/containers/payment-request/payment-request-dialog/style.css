@@ -1,0 +1,13 @@
+.invoice-dropdown-order-no {
+  color: #667085;
+}
+
+.gst-part-inputs {
+  grid-template-columns: 6fr 2fr 2fr;
+  gap: 40px;
+}
+
+.payment-request-detail-field-row {
+  grid-template-columns: 6fr 6fr;
+  gap: 20;
+}

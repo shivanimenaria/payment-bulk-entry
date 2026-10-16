@@ -2,32 +2,34 @@
 
 import { useSession } from "@/lib/auth-context";
 
-// Page title bar. Shows the MOCK DATA badge whenever /api/auth/me reports
-// dataSource=mock, and a session error banner if /api/auth/me failed (no
-// silent fallback to an anonymous page).
-export function PageHeader({ title, actions }: { title: string; actions?: React.ReactNode }) {
-  const { dataSource, error } = useSession();
+// Optional actions row above the page content. rDash shows the breadcrumb,
+// tabs and currency above the iframe, so there is no page title. The MOCK DATA
+// badge lives in the mock-only preview frame (RdashPreviewFrame). A session
+// error is surfaced as a banner (no silent fallback).
+export function PageHeader({ actions }: { actions?: React.ReactNode }) {
+  const { error, authMode } = useSession();
+  const dev = authMode === "static_token";
+  if (!actions && !error && !dev) return null;
   return (
-    <header className="border-b border-gray-200 bg-white">
-      <div className="flex h-14 items-center justify-between gap-4 px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <h1 className="truncate text-lg font-semibold tracking-tight">{title}</h1>
-          {dataSource === "mock" && (
+    <div className="px-5 pt-5">
+      {actions || dev ? (
+        <div className="flex items-center justify-end gap-3">
+          {actions}
+          {dev ? (
             <span
-              className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-amber-800"
-              title="RDASH_DATA_SOURCE=mock — data is not from rDash"
+              className="rounded-[3px] border border-rd-red bg-white px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-rd-red"
+              title="RDASH_AUTH_MODE=static_token — dev only, real rDash data with a static token"
             >
-              Mock data
+              DEV — REAL DATA
             </span>
-          )}
+          ) : null}
         </div>
-        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
-      </div>
+      ) : null}
       {error ? (
-        <div role="alert" className="border-t border-red-200 bg-red-50 px-6 py-2 text-sm text-red-800">
+        <div role="alert" className="mt-2 rounded-rd border border-rd-border bg-white p-[15px] text-[14px] font-semibold text-rd-red">
           Your session could not be verified. Reopen Bulk Payment from the vendor&apos;s Vendor Payments page in rDash.
         </div>
       ) : null}
-    </header>
+    </div>
   );
 }

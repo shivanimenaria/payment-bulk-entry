@@ -8,15 +8,18 @@ import { getRdashSource } from "@/lib/server/rdash-source";
 import type { RdashSource } from "@/lib/server/rdash-source/types";
 import { AuthError } from "@/lib/server/auth";
 import { RdashResponseShapeError, paginateRdash } from "@/lib/server/api";
+import { isPayable } from "@/lib/payments/payable";
 import projectsJson from "@/lib/server/rdash-source/mock-data/projects.json";
 import configJson from "@/lib/server/rdash-source/mock-data/config.mock-vendor.json";
 import detailsJson from "@/lib/server/rdash-source/mock-data/details.json";
 import type { BulkPaymentEntryInput, VendorPaymentRequestConfigItem } from "@/types/rdash";
+import { rdashPaise } from "@/lib/payments/money";
+import realConfigPage from "./fixtures/real-config-page.json";
 
 const API = "https://rdash-api.example.com";
 
 // Exact Swagger key sets (CLAUDE.md "Response fields"). project_id is the one
-// TODO(verify) addition on config items (mock only).
+// (now required) addition on config items.
 const PROJECT_KEYS = ["created_at", "id", "is_archived", "is_deleted", "job_id", "name"];
 const CONFIG_KEYS = ["currency", "paid_amount", "payment_due", "payment_request_id", "project_id", "request_amount", "status"];
 const DETAILS_KEYS = [
@@ -60,28 +63,52 @@ describe("mock fixtures: strict Swagger shapes", () => {
     for (const p of projectsJson) expect(Object.keys(p).sort()).toEqual(PROJECT_KEYS);
   });
 
-  it("config: 6 requests across all 5 projects; dues 30k/50k/40k/45k/35k (=200000) + one 0", () => {
-    expect(configJson.count).toBe(6);
-    expect(configJson.data).toHaveLength(6);
-    for (const c of configJson.data) {
+  it("config: 9 requests across all 5 projects; 5 payable (30k/50k/40k/45k/35k = 200000) + 4 non-payable", () => {
+    // Real shapes: DRF page, decimal-string amounts, currency object.
+    expect(Object.keys(configJson).sort()).toEqual(["count", "next", "previous", "results"]);
+    expect(configJson.next).toBeNull();
+    expect(configJson.count).toBe(9);
+    expect(configJson.results).toHaveLength(9);
+    for (const c of configJson.results) {
       expect(Object.keys(c).sort()).toEqual(CONFIG_KEYS);
-      expect(c.request_amount).toBe(c.paid_amount + c.payment_due);
+      for (const a of [c.request_amount, c.paid_amount, c.payment_due]) expect(typeof a).toBe("string");
+      expect(rdashPaise(c.request_amount)).toBe(rdashPaise(c.paid_amount)! + rdashPaise(c.payment_due)!);
+      expect(Object.keys(c.currency).sort()).toEqual(["code", "id", "locale", "name", "symbol"]);
     }
-    const dues = configJson.data.map((c) => c.payment_due);
-    expect(dues.filter((d) => d > 0)).toEqual([30000, 50000, 40000, 45000, 35000]);
-    expect(dues.reduce((a, b) => a + b, 0)).toBe(200000);
-    expect(dues.filter((d) => d === 0)).toHaveLength(1);
-    expect(new Set(configJson.data.map((c) => c.project_id))).toEqual(new Set(projectsJson.map((p) => p.id)));
+    // Only real rDash PAYMENT_REQUEST_STATUS values.
+    for (const c of configJson.results) {
+      expect(["pending", "approved", "rejected", "cancelled", "hold", "submitted"]).toContain(c.status);
+    }
+    const payable = configJson.results.filter(isPayable);
+    expect(payable.map((c) => [c.payment_request_id, c.status, c.payment_due])).toEqual([
+      ["mock-pr-101", "approved", "30000.0000"],
+      ["mock-pr-102", "pending", "50000.0000"],
+      ["mock-pr-103", "approved", "40000.0000"],
+      ["mock-pr-104", "submitted", "45000.0000"],
+      ["mock-pr-105", "approved", "35000.0000"],
+    ]);
+    expect(payable.reduce((a, c) => a + rdashPaise(c.payment_due)!, 0)).toBe(20000000);
+    expect(configJson.results.filter((c) => !isPayable(c)).map((c) => [c.status, c.payment_due])).toEqual([
+      ["approved", "0"],
+      ["rejected", "20000.0000"],
+      ["cancelled", "15000.0000"],
+      ["hold", "25000.0000"],
+    ]);
+    expect(new Set(configJson.results.map((c) => c.project_id))).toEqual(new Set(projectsJson.map((p) => p.id)));
   });
 
   it("details: one per request, Swagger keys, amounts match config, some null number/due date", () => {
-    expect(detailsJson).toHaveLength(6);
+    expect(detailsJson).toHaveLength(9);
     for (const d of detailsJson) {
       expect(Object.keys(d).sort()).toEqual(DETAILS_KEYS);
-      const c = configJson.data.find((x) => x.payment_request_id === d.id)!;
+      const c = configJson.results.find((x) => x.payment_request_id === d.id)!;
+      expect(d.request_status).toBe(c.status);
       expect(d.payment_due).toBe(c.payment_due);
       expect(d.total_request_amount).toBe(c.request_amount);
-      expect(d.request_amount_without_tax + d.tax_amount).toBeCloseTo(d.total_request_amount, 2);
+      expect(rdashPaise(d.request_amount_without_tax)! + rdashPaise(d.tax_amount)!).toBe(rdashPaise(d.total_request_amount));
+      // requested_by = { id, name } | null (corrected Swagger)
+      expect(d.requested_by === null || Object.keys(d.requested_by).sort().join() === "id,name").toBe(true);
+      for (const a of d.attachments) expect(Object.keys(a).sort()).toEqual(["file", "id", "name", "uploaded_at", "uploaded_by"]);
     }
     expect(detailsJson.some((d) => d.request_number === null)).toBe(true);
     expect(detailsJson.some((d) => d.due_date === null)).toBe(true);
@@ -106,8 +133,33 @@ describe("mock source", () => {
     expect(res.created).toEqual([{ id: expect.stringMatching(/^mock-entry-/), payment_request_id: "mock-pr-102" }]);
     expect(res.failed).toEqual([{ payment_request_id: "mock-pr-101", error: "Amount exceeds payment due" }]);
     const after = (await src.listPaymentRequestConfig("mock-vendor")).find((c) => c.payment_request_id === "mock-pr-102")!;
-    expect(after.payment_due).toBe(29999.5);
-    expect(after.paid_amount).toBe(50000.5);
+    // Written back in rDash's decimal-string form.
+    expect(after.payment_due).toBe("29999.5000");
+    expect(after.paid_amount).toBe("50000.5000");
+  });
+
+  it("two separate module instances share ONE store (next dev compiles each route separately)", async () => {
+    vi.resetModules();
+    const bulkRouteCopy = await import("@/lib/server/rdash-source/mock");
+    vi.resetModules();
+    const requestsRouteCopy = await import("@/lib/server/rdash-source/mock");
+    expect(bulkRouteCopy).not.toBe(requestsRouteCopy); // genuinely different instances
+    bulkRouteCopy.resetMockState();
+
+    const res = await bulkRouteCopy
+      .createMockSource()
+      .createBulkPaymentEntries([entry("mock-pr-101", 30000), entry("mock-pr-103", 40000)]);
+    expect(res.created).toHaveLength(2);
+
+    const rows = await requestsRouteCopy.createMockSource().listPaymentRequestConfig("mock-vendor");
+    const payable = rows.filter(isPayable);
+    expect(payable.map((r) => r.payment_request_id)).toEqual(["mock-pr-102", "mock-pr-104", "mock-pr-105"]);
+    expect(payable.reduce((t, r) => t + rdashPaise(r.payment_due)!, 0)).toBe(13000000);
+
+    // Entry ids continue across instances (same store, not two counters).
+    const next = await requestsRouteCopy.createMockSource().createBulkPaymentEntries([entry("mock-pr-102", 1)]);
+    expect(next.created[0].id).toBe("mock-entry-3");
+    requestsRouteCopy.resetMockState();
   });
 
   it("bulk: ids in MOCK_FAIL_IDS fail; unknown ids fail", async () => {
@@ -138,15 +190,18 @@ describe("loadAllocationRows", () => {
     };
     return src;
   }
-  const cfg = (id: string, project_id?: string): VendorPaymentRequestConfigItem => ({
-    payment_request_id: id,
-    status: "approved",
-    request_amount: 100,
-    paid_amount: 0,
-    payment_due: 100,
-    currency: {},
-    ...(project_id ? { project_id } : {}),
-  });
+  // project_id is required by the corrected Swagger; omitting it here tests
+  // the defensive runtime path (detailsUnavailable / temp id).
+  const cfg = (id: string, project_id?: string): VendorPaymentRequestConfigItem =>
+    ({
+      payment_request_id: id,
+      status: "approved",
+      request_amount: "100.0000",
+      paid_amount: "0",
+      payment_due: "100.0000",
+      currency: { id: "c", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" },
+      ...(project_id ? { project_id } : {}),
+    }) as VendorPaymentRequestConfigItem;
 
   describe("RDASH_TEMP_PROJECT_ID (TODO(remove-temp-project-id))", () => {
     afterEach(() => {
@@ -207,9 +262,9 @@ describe("loadAllocationRows", () => {
     });
   });
 
-  it("mock: all 6 rows with project names and details; zero-due row kept for the caller to hide", async () => {
+  it("mock: all 9 rows with project names and details; nothing filtered unless the caller asks", async () => {
     const rows = await loadAllocationRows(createMockSource(), "mock-vendor");
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(9);
     for (const r of rows) {
       expect(r.detailsUnavailable).toBe(false);
       expect(r.details?.id).toBe(r.config.payment_request_id);
@@ -283,35 +338,82 @@ describe("real source", () => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
   });
+  const INR = { id: "c", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" };
   const item = (i: number) => ({
     payment_request_id: `pr${i}`,
+    project_id: "PJ1",
     status: "approved",
-    request_amount: 1,
-    paid_amount: 0,
-    payment_due: 1,
-    currency: {},
+    request_amount: "1.0000",
+    paid_amount: "0",
+    payment_due: "1.0000",
+    currency: INR,
   });
+  const CONFIG = "/v2/vendor-payment-requests/config/";
+  const drf = (count: number, results: unknown[], next: string | null) => ok({ count, next, previous: null, results });
 
-  it("config: session vendor re-encoded, paged until count (offset advances by items received)", async () => {
-    // Server caps the page at 2 items regardless of limit=200.
-    fetchMock.mockImplementation(async (url: string) => {
-      const offset = Number(new URL(url).searchParams.get("offset"));
-      return ok({ count: 5, data: [item(offset), item(offset + 1)].filter((x) => Number(x.payment_request_id.slice(2)) < 5) });
-    });
+  it("config: DRF pages — follows `next` exactly until null; total must equal count; vendor re-encoded", async () => {
+    const enc33 = new Hashids(TEST_SALT, 16).encode(33);
+    const nextUrl = (offset: number) => `${API}${CONFIG}?limit=2&offset=${offset}&vendor_id=${enc33}`;
+    fetchMock
+      .mockResolvedValueOnce(drf(5, [item(0), item(1)], nextUrl(2)))
+      .mockResolvedValueOnce(drf(5, [item(2), item(3)], nextUrl(4)))
+      .mockResolvedValueOnce(drf(5, [item(4)], null));
     const rows = await createRealSource("tok").listPaymentRequestConfig("33");
     expect(rows.map((r) => r.payment_request_id)).toEqual(["pr0", "pr1", "pr2", "pr3", "pr4"]);
-    const first = new URL(fetchMock.mock.calls[0][0]);
-    expect(first.pathname).toBe("/v2/vendor-payment-requests/config/");
-    expect(first.searchParams.get("vendor_id")).toBe(new Hashids(TEST_SALT, 16).encode(33));
-    expect(fetchMock.mock.calls.map((c) => new URL(c[0]).searchParams.get("offset"))).toEqual(["0", "2", "4"]);
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    const first = new URL(urls[0]);
+    expect(first.pathname).toBe(CONFIG);
+    expect(first.searchParams.get("vendor_id")).toBe(enc33);
+    expect([first.searchParams.get("limit"), first.searchParams.get("offset")]).toEqual(["200", "0"]);
+    expect(urls.slice(1)).toEqual([nextUrl(2), nextUrl(4)]); // `next` followed as given
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer tok");
   });
 
-  it("config: missing count → error; empty page before count → error (never partial)", async () => {
-    fetchMock.mockResolvedValueOnce(ok({ data: [item(0)] }));
+  it("config: the captured production page (tests/fixtures/real-config-page.json) is read via results/next", async () => {
+    const saved = process.env.RDASH_API_URL;
+    process.env.RDASH_API_URL = "https://api.rdash.io"; // fixture's `next` host
+    try {
+      const page1 = realConfigPage; // count 89, 1 result, next → offset=10
+      const first = page1.data.results[0];
+      // Serve the remaining 88 rows over further `next` pages (11 + 77).
+      const rest = Array.from({ length: 88 }, (_, i) => ({ ...first, payment_request_id: `${first.payment_request_id}-${i}` }));
+      fetchMock
+        .mockResolvedValueOnce(new Response(JSON.stringify(page1), { status: 200 }))
+        .mockResolvedValueOnce(drf(89, rest.slice(0, 11), "https://api.rdash.io/v2/vendor-payment-requests/config/?limit=77&offset=12&vendor_id=x"))
+        .mockResolvedValueOnce(drf(89, rest.slice(11), null));
+      const rows = await createRealSource("tok").listPaymentRequestConfig("33");
+      expect(rows).toHaveLength(89);
+      expect(String(fetchMock.mock.calls[1][0])).toBe(new URL(page1.data.next as string).toString());
+      const r = rows[0];
+      expect(r).toMatchObject({ payment_request_id: "6MWy2q21ZJxj7aJY", project_id: "1o9M5v3NGWPbx2Q4", status: "approved" });
+      expect(rdashPaise(r.payment_due)).toBe(2950000); // "29500.0000" → exact paise
+      expect(rdashPaise(r.paid_amount)).toBe(0);
+      expect(r.currency).toEqual({ id: "9ng3XGvlNqK8oJ4V", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" });
+      expect(isPayable(r)).toBe(true);
+    } finally {
+      process.env.RDASH_API_URL = saved;
+    }
+  });
+
+  it.each([
+    ["old { count, data } shape", () => [ok({ count: 1, data: [item(0)] })]],
+    ["missing count", () => [ok({ next: null, previous: null, results: [item(0)] })]],
+    ["total ≠ count when next is null", () => [drf(3, [item(0)], null)]],
+    ["count changes between pages", () => [drf(3, [item(0)], `${API}${CONFIG}?offset=1`), drf(4, [item(1)], null)]],
+    ["empty page while next is set", () => [drf(3, [], `${API}${CONFIG}?offset=1`)]],
+    ["next is not a URL", () => [drf(3, [item(0)], "not a url")]],
+  ])("config: %s → RdashResponseShapeError (never a partial list)", async (_l, pages) => {
+    for (const p of pages()) fetchMock.mockResolvedValueOnce(p);
     await expect(createRealSource("tok").listPaymentRequestConfig("33")).rejects.toBeInstanceOf(RdashResponseShapeError);
-    fetchMock.mockResolvedValueOnce(ok({ count: 3, data: [item(0)] })).mockResolvedValueOnce(ok({ count: 3, data: [] }));
-    await expect(createRealSource("tok").listPaymentRequestConfig("33")).rejects.toBeInstanceOf(RdashResponseShapeError);
+  });
+
+  it("config: `next` on another origin or path is refused — the token is never sent there", async () => {
+    for (const evil of ["https://evil.example.com/v2/vendor-payment-requests/config/?offset=1", `${API}/v2/other/?offset=1`]) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValueOnce(drf(2, [item(0)], evil));
+      await expect(createRealSource("tok").listPaymentRequestConfig("33")).rejects.toBeInstanceOf(RdashResponseShapeError);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("details: project and request ids go into the path unchanged", async () => {
@@ -348,7 +450,19 @@ describe("real source: project names with hashid ids", () => {
       if (u.pathname === "/v2/vendor-payment-requests/config/") {
         return ok({
           count: 1,
-          data: [{ payment_request_id: PR, status: "approved", request_amount: 10, paid_amount: 0, payment_due: 10, currency: {}, project_id: P5 }],
+          next: null,
+          previous: null,
+          results: [
+            {
+              payment_request_id: PR,
+              status: "approved",
+              request_amount: "10.0000",
+              paid_amount: "0",
+              payment_due: "10.0000",
+              currency: { id: "c", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" },
+              project_id: P5,
+            },
+          ],
         });
       }
       if (u.pathname === "/v2/projects") {
@@ -406,7 +520,7 @@ describe("getRdashSource", () => {
   it("mock mode → mock data", async () => {
     process.env.RDASH_DATA_SOURCE = "mock";
     const rows = await getRdashSource({ accessToken: "mock-access-token" }).listPaymentRequestConfig("mock-vendor");
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(9);
   });
 
   it("missing / invalid RDASH_DATA_SOURCE → throws", () => {

@@ -1,0 +1,27 @@
+.form-amount-card {
+  background-color: #edf1f666;
+}
+
+.form-amount-card-stretched {
+  grid-column: span 2;
+}
+
+.form-amount-card-header-icon {
+  width: 16px !important;
+  height: 16px !important;
+}
+
+.form-request-amount-card {
+  border: dashed 1px #fecdca;
+  background-color: #fecdca33;
+}
+
+.form-request-amount-card .form-amount-card-header {
+  color: black;
+  font-size: 14px;
+}
+
+svg.po-data-info {
+  height: 18px;
+  width: 18px;
+}

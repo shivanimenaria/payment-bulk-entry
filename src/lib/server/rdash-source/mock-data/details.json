@@ -12,7 +12,10 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Running Bill",
-    "requested_by": "Anita Sharma",
+    "requested_by": {
+      "id": "mock-user-anita",
+      "name": "Anita Sharma"
+    },
     "requested_at": "2026-08-04T10:12:00Z",
     "invoice": {
       "id": "mock-inv-501",
@@ -22,15 +25,26 @@
       "id": "mock-po-301",
       "number": "PO-2026-0311"
     },
-    "request_amount_without_tax": 25423.73,
-    "tax_amount": 4576.27,
-    "total_request_amount": 30000,
-    "paid_till_date": 0,
-    "payment_due": 30000,
+    "request_amount_without_tax": "25423.7300",
+    "tax_amount": "4576.2700",
+    "total_request_amount": "30000.0000",
+    "paid_till_date": "0",
+    "payment_due": "30000.0000",
     "remark": "RA bill 1 \u2014 slab work",
     "due_date": "2026-09-03",
     "request_status": "approved",
-    "attachments": []
+    "attachments": [
+      {
+        "id": "mock-att-1",
+        "file": "https://example.invalid/mock/ra-bill-1.pdf",
+        "name": "ra-bill-1.pdf",
+        "uploaded_by": {
+          "id": "mock-user-anita",
+          "name": "Anita Sharma"
+        },
+        "uploaded_at": "2026-08-04T10:15:00Z"
+      }
+    ]
   },
   {
     "id": "mock-pr-102",
@@ -45,21 +59,24 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Advance",
-    "requested_by": "Rahul Verma",
+    "requested_by": {
+      "id": "mock-user-rahul",
+      "name": "Rahul Verma"
+    },
     "requested_at": "2026-08-11T09:30:00Z",
     "invoice": null,
     "purchase_order": {
       "id": "mock-po-302",
       "number": "PO-2026-0322"
     },
-    "request_amount_without_tax": 67796.61,
-    "tax_amount": 12203.39,
-    "total_request_amount": 80000,
-    "paid_till_date": 30000,
-    "payment_due": 50000,
+    "request_amount_without_tax": "67796.6100",
+    "tax_amount": "12203.3900",
+    "total_request_amount": "80000.0000",
+    "paid_till_date": "30000.0000",
+    "payment_due": "50000.0000",
     "remark": null,
     "due_date": null,
-    "request_status": "partially_paid",
+    "request_status": "pending",
     "attachments": []
   },
   {
@@ -75,18 +92,21 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Material Supply",
-    "requested_by": "Priya Nair",
+    "requested_by": {
+      "id": "mock-user-priya",
+      "name": "Priya Nair"
+    },
     "requested_at": "2026-08-19T14:45:00Z",
     "invoice": {
       "id": "mock-inv-503",
       "number": "INV/26-27/0477"
     },
     "purchase_order": null,
-    "request_amount_without_tax": 33898.31,
-    "tax_amount": 6101.69,
-    "total_request_amount": 40000,
-    "paid_till_date": 0,
-    "payment_due": 40000,
+    "request_amount_without_tax": "33898.3100",
+    "tax_amount": "6101.6900",
+    "total_request_amount": "40000.0000",
+    "paid_till_date": "0",
+    "payment_due": "40000.0000",
     "remark": "Cement and steel delivery",
     "due_date": "2026-09-18",
     "request_status": "approved",
@@ -105,7 +125,10 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Running Bill",
-    "requested_by": "Anita Sharma",
+    "requested_by": {
+      "id": "mock-user-anita",
+      "name": "Anita Sharma"
+    },
     "requested_at": "2026-08-27T11:05:00Z",
     "invoice": {
       "id": "mock-inv-504",
@@ -115,14 +138,14 @@
       "id": "mock-po-304",
       "number": "PO-2026-0340"
     },
-    "request_amount_without_tax": 50847.46,
-    "tax_amount": 9152.54,
-    "total_request_amount": 60000,
-    "paid_till_date": 15000,
-    "payment_due": 45000,
+    "request_amount_without_tax": "50847.4600",
+    "tax_amount": "9152.5400",
+    "total_request_amount": "60000.0000",
+    "paid_till_date": "15000.0000",
+    "payment_due": "45000.0000",
     "remark": null,
     "due_date": "2026-09-26",
-    "request_status": "partially_paid",
+    "request_status": "submitted",
     "attachments": []
   },
   {
@@ -138,18 +161,21 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Retention Release",
-    "requested_by": "Vikram Singh",
+    "requested_by": {
+      "id": "mock-user-vikram",
+      "name": "Vikram Singh"
+    },
     "requested_at": "2026-09-05T16:20:00Z",
     "invoice": null,
     "purchase_order": {
       "id": "mock-po-305",
       "number": "PO-2026-0355"
     },
-    "request_amount_without_tax": 29661.02,
-    "tax_amount": 5338.98,
-    "total_request_amount": 35000,
-    "paid_till_date": 0,
-    "payment_due": 35000,
+    "request_amount_without_tax": "29661.0200",
+    "tax_amount": "5338.9800",
+    "total_request_amount": "35000.0000",
+    "paid_till_date": "0",
+    "payment_due": "35000.0000",
     "remark": "Retention after DLP",
     "due_date": null,
     "request_status": "approved",
@@ -168,7 +194,10 @@
       "name": "Acme Developers Pvt Ltd"
     },
     "request_type": "Final Bill",
-    "requested_by": "Rahul Verma",
+    "requested_by": {
+      "id": "mock-user-rahul",
+      "name": "Rahul Verma"
+    },
     "requested_at": "2026-07-15T12:00:00Z",
     "invoice": {
       "id": "mock-inv-498",
@@ -178,14 +207,104 @@
       "id": "mock-po-301",
       "number": "PO-2026-0311"
     },
-    "request_amount_without_tax": 21186.44,
-    "tax_amount": 3813.56,
-    "total_request_amount": 25000,
-    "paid_till_date": 25000,
-    "payment_due": 0,
+    "request_amount_without_tax": "21186.4400",
+    "tax_amount": "3813.5600",
+    "total_request_amount": "25000.0000",
+    "paid_till_date": "25000.0000",
+    "payment_due": "0",
     "remark": "Settled in full",
     "due_date": "2026-08-14",
-    "request_status": "paid",
+    "request_status": "approved",
+    "attachments": []
+  },
+  {
+    "id": "mock-pr-107",
+    "request_id": "REQ-0107",
+    "request_number": "PR-2026-0107",
+    "vendor": {
+      "id": "mock-vendor",
+      "name": "Shree Ganesh Builders"
+    },
+    "client": {
+      "id": "mock-client-1",
+      "name": "Acme Developers Pvt Ltd"
+    },
+    "request_type": "Advance",
+    "requested_by": {
+      "id": "mock-user-priya",
+      "name": "Priya Nair"
+    },
+    "requested_at": "2026-08-22T09:10:00Z",
+    "invoice": null,
+    "purchase_order": null,
+    "request_amount_without_tax": "16949.1500",
+    "tax_amount": "3050.8500",
+    "total_request_amount": "20000.0000",
+    "paid_till_date": "0",
+    "payment_due": "20000.0000",
+    "remark": "Rejected \u2014 duplicate claim",
+    "due_date": "2026-09-21",
+    "request_status": "rejected",
+    "attachments": []
+  },
+  {
+    "id": "mock-pr-108",
+    "request_id": null,
+    "request_number": "PR-2026-0108",
+    "vendor": {
+      "id": "mock-vendor",
+      "name": "Shree Ganesh Builders"
+    },
+    "client": {
+      "id": "mock-client-1",
+      "name": "Acme Developers Pvt Ltd"
+    },
+    "request_type": "Material Supply",
+    "requested_by": {
+      "id": "mock-user-rahul",
+      "name": "Rahul Verma"
+    },
+    "requested_at": "2026-08-25T13:40:00Z",
+    "invoice": null,
+    "purchase_order": null,
+    "request_amount_without_tax": "12711.8600",
+    "tax_amount": "2288.1400",
+    "total_request_amount": "15000.0000",
+    "paid_till_date": "0",
+    "payment_due": "15000.0000",
+    "remark": null,
+    "due_date": null,
+    "request_status": "cancelled",
+    "attachments": []
+  },
+  {
+    "id": "mock-pr-109",
+    "request_id": "REQ-0109",
+    "request_number": null,
+    "vendor": {
+      "id": "mock-vendor",
+      "name": "Shree Ganesh Builders"
+    },
+    "client": {
+      "id": "mock-client-1",
+      "name": "Acme Developers Pvt Ltd"
+    },
+    "request_type": "Running Bill",
+    "requested_by": {
+      "id": "mock-user-vikram",
+      "name": "Vikram Singh"
+    },
+    "requested_at": "2026-09-01T11:25:00Z",
+    "invoice": null,
+    "purchase_order": null,
+    "request_amount_without_tax": "21186.4400",
+    "tax_amount": "3813.5600",
+    "total_request_amount": "25000.0000",
+    "paid_till_date": "0",
+    "payment_due": "25000.0000",
+    "remark": "On hold pending site verification",
+    "due_date": "2026-10-01",
+    "request_status": "hold",
     "attachments": []
   }
 ]

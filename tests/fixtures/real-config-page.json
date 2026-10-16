@@ -1,0 +1,28 @@
+{
+  "code": 200,
+  "success": true,
+  "message": "",
+  "errors": null,
+  "data": {
+    "count": 89,
+    "next": "https://api.rdash.io/v2/vendor-payment-requests/config/?limit=10&offset=10&vendor_id=…",
+    "previous": null,
+    "results": [
+      {
+        "payment_request_id": "6MWy2q21ZJxj7aJY",
+        "project_id": "1o9M5v3NGWPbx2Q4",
+        "status": "approved",
+        "request_amount": "29500.0000",
+        "paid_amount": "0",
+        "payment_due": "29500.0000",
+        "currency": {
+          "id": "9ng3XGvlNqK8oJ4V",
+          "name": "Indian National Rupee",
+          "symbol": "₹",
+          "code": "INR",
+          "locale": "en-IN"
+        }
+      }
+    ]
+  }
+}

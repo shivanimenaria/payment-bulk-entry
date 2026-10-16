@@ -38,11 +38,11 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const { auth, cookieHeader, mock } = await getSessionOrMock(request);
+    const { auth, cookieHeader, mock, dev } = await getSessionOrMock(request);
     // Internal storage form is the decoded integer-string ("498"); the browser
-    // only ever sees rDash hashids. Mock IDs are not real rDash IDs, so they
-    // are returned as-is.
-    const encode = (id: string) => (!id ? "" : mock ? id : encodeRdashId(id));
+    // only ever sees rDash hashids. Mock IDs are not real rDash IDs, and DEV
+    // static-token ids are already rDash's own, so both are returned as-is.
+    const encode = (id: string) => (!id ? "" : mock || dev ? id : encodeRdashId(id));
     const payload = {
       orgId: encode(auth.orgId),
       projectId: encode(auth.projectId),
@@ -50,6 +50,7 @@ export async function GET(request: NextRequest) {
       vendorId: encode(auth.vendorId),
       displayName: auth.displayName,
       dataSource,
+      authMode: dev ? "static_token" : "handover",
     };
     const response = safeJson(payload, { route: "GET /api/auth/me" });
     if (cookieHeader) response.headers.set("Set-Cookie", cookieHeader);

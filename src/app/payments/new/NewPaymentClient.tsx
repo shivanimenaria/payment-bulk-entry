@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shell/PageHeader";
-import { Button } from "@/components/ui/button";
+import { rdButtonOutline, rdButtonPrimary, rdCard, rdTextLink } from "@/components/rd/styles";
 import { useUI } from "@/components/ui/toast-confirm";
 import { apiFetch } from "@/lib/api-fetch";
 import { useSession } from "@/lib/auth-context";
 import { validateAllocation } from "@/lib/payments/validation";
 import { computeTotals } from "@/lib/payments/totals";
+import { rowsCurrency } from "@/lib/payments/currency";
 import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
 import { clearAppliedAmounts, dismissFailedRow, payInFull, setRowAmount } from "@/lib/payments/allocation";
 import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
@@ -30,7 +31,7 @@ import type {
 } from "@/types/payments";
 import { PaymentHeader } from "./components/PaymentHeader";
 import { SummaryCards } from "./components/SummaryCards";
-import { AllocationTable, TableSkeleton } from "./components/AllocationTable";
+import { AllocationTable, TableBox, TableSkeleton } from "./components/AllocationTable";
 import { EmptyState, LoadError } from "./components/EmptyState";
 import { ValidationList } from "./components/ValidationList";
 import { PayloadPreview } from "./components/PayloadPreview";
@@ -130,6 +131,7 @@ export function NewPaymentClient() {
   }, [loadRows]);
 
   const totals = useMemo(() => computeTotals(header.amountPaid, rows), [header.amountPaid, rows]);
+  const currency = useMemo(() => rowsCurrency(rows), [rows]);
   const validation = useMemo(() => validateAllocation(header, rows), [header, rows]);
   const current = useMemo<Sent | null>(
     () =>
@@ -217,7 +219,7 @@ export function NewPaymentClient() {
       if (res.ok && isBulkSubmitResult(body)) {
         result = body;
         fullSuccess = body.failed.length === 0;
-        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels });
+        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels, symbol: rowsCurrency(rows).symbol });
         if (fullSuccess) {
           setResultSent(null);
           setHeader(EMPTY_HEADER);
@@ -302,21 +304,23 @@ export function NewPaymentClient() {
 
   return (
     <>
-      <PageHeader title="Bulk payment entry" actions={<span className="text-xs font-medium text-gray-500">Currency: INR</span>} />
-      <main className="flex flex-1 flex-col gap-4 p-6 pb-24">
+      <PageHeader />
+      <main className="flex flex-1 flex-col gap-5 p-5">
         {/* Disabled while a submit is in flight — no edits can race the response. */}
-        <fieldset disabled={submitting !== null} aria-busy={submitting !== null} className="flex min-w-0 flex-col gap-4">
+        <fieldset disabled={submitting !== null} aria-busy={submitting !== null} className="flex min-w-0 flex-col gap-5">
           <PaymentHeader value={header} errors={headerErrors} onChange={setHeaderField} />
-          <SummaryCards totals={totals} loaded={load.status === "ready"} />
+          <SummaryCards totals={totals} loaded={load.status === "ready"} rowCount={rows.length} currency={currency} />
 
-          <section aria-label="Payment due" className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-900">
+          <TableBox
+            title={
+              <>
                 Payment due
-                <span className="ml-1 font-normal text-gray-500">
+                <span className="ml-1 font-normal text-rd-muted">
                   · {totals.selectedCount} of {rows.length} selected
                 </span>
-              </h2>
+              </>
+            }
+            action={
               <button
                 type="button"
                 disabled={load.status !== "ready" || totals.selectedCount === 0}
@@ -325,17 +329,29 @@ export function NewPaymentClient() {
                   edited();
                   setRows((r) => clearAppliedAmounts(r));
                 }}
-                className="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+                className={rdTextLink}
               >
                 Clear applied amount
               </button>
-            </div>
-
+            }
+            footer={
+              <>
+                <button type="button" className={rdButtonPrimary} disabled={!validation.ok || submitting !== null} onClick={onSubmit}>
+                  {submitting === "submit" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {submitting === "submit" ? "Submitting…" : "Submit payments"}
+                </button>
+                <button type="button" className={rdButtonOutline} disabled={submitting !== null} onClick={() => void onCancel()}>
+                  Cancel
+                </button>
+              </>
+            }
+          >
             {load.status === "loading" && <TableSkeleton />}
             {load.status === "error" && <LoadError message={load.message} onRetry={() => void loadRows()} />}
             {load.status === "ready" && rows.length === 0 && <EmptyState />}
             {load.status === "ready" && rows.length > 0 && (
               <AllocationTable
+                currencySymbol={currency.symbol}
                 rows={rows}
                 rowErrors={rowErrors}
                 onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
@@ -344,13 +360,15 @@ export function NewPaymentClient() {
                 onRemove={onRemoveFailed}
               />
             )}
-          </section>
+          </TableBox>
 
           {load.status === "ready" && rows.length > 0 && dirty ? <ValidationList items={validation.summary} /> : null}
         </fieldset>
 
         {refreshError ? (
-          <LoadError message={refreshError} onRetry={() => void refreshAfter(null, false)} />
+          <div className={rdCard}>
+            <LoadError message={refreshError} onRetry={() => void refreshAfter(null, false)} />
+          </div>
         ) : null}
         {outcome ? (
           <SubmitResult
@@ -366,16 +384,6 @@ export function NewPaymentClient() {
           <PayloadPreview label={preview.label} request={preview.sent.request} entries={preview.sent.entries} />
         ) : null}
       </main>
-
-      <div className="sticky bottom-0 z-10 flex items-center gap-2 border-t border-gray-200 bg-white px-6 py-3">
-        <Button size="sm" className="h-9 gap-1.5 px-4" disabled={!validation.ok || submitting !== null} onClick={onSubmit}>
-          {submitting === "submit" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          {submitting === "submit" ? "Submitting…" : "Submit payments"}
-        </Button>
-        <Button size="sm" variant="outline" className="h-9 px-4" disabled={submitting !== null} onClick={() => void onCancel()}>
-          Cancel
-        </Button>
-      </div>
     </>
   );
 }

@@ -1,0 +1,22 @@
+.payment-entry-table-columns {
+  gap: 10px;
+}
+
+.order-vendor-payment-entry-table-columns,
+.my-vendor-vendor-payment-entry-table-columns,
+.manage-client-client-payment-entry-table-columns {
+  grid-template-columns: 0.5fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr 0.5fr;
+}
+
+.boq-client-payment-entry-table-columns {
+  grid-template-columns: 0.5fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr 0.5fr;
+}
+
+.payment-entry-table-columns > div {
+  min-width: 0;
+}
+
+.payment-entry-cancel-prompt .rd-prompt-action-btns {
+  justify-content: center;
+  gap: 20px;
+}

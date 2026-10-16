@@ -23,7 +23,8 @@ export const DETAILS_ERROR_MESSAGE = "Details could not be loaded";
 //    401 → re-handover) instead of being hidden in rows.
 //  - Rows are NOT filtered by default. `opts.keep` lets the caller drop
 //    config items BEFORE any details/projects call (e.g. payment_due 0).
-// TODO(verify): project_id on config items (docs/api-notes.md → #10).
+// project_id is required in the corrected Swagger (docs/api-notes.md #10, resolved);
+// a missing one is still handled defensively above.
 export async function loadAllocationRows(
   source: RdashSource,
   vendorId: string,

@@ -1,0 +1,40 @@
+.payment-request-table-columns {
+  gap: 10px;
+}
+
+.order-vendor-payments-table-columns,
+.my-vendor-vendor-payments-table-columns,
+.manage-client-client-payments-table-columns {
+  grid-template-columns: 0.5fr 1.5fr 1.75fr 2fr 1.75fr 1.75fr 1.5fr 1.5fr 1.75fr 1.5fr 1.5fr 0.5fr;
+}
+
+.order-vendor-payments-table-columns-payment-due,
+.manage-client-client-payments-table-columns-payment-due,
+.my-vendor-vendor-payments-table-columns-payment-due {
+  grid-template-columns: 0.5fr 1.5fr 1.75fr 2fr 1.75fr 1.75fr 1.5fr 1.5fr 1.75fr 1.5fr 0.4fr;
+}
+
+.boq-client-payments-table-columns {
+  grid-template-columns: 0.5fr 1.5fr 1.75fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 1.5fr 0.5fr;
+}
+
+.boq-client-payments-table-columns-payment-due {
+  grid-template-columns: 0.5fr 1.5fr 1.75fr 1.5fr 2fr 1.5fr 1.5fr 1.5fr 1.5fr 0.4fr;
+}
+
+.payment-request-table-columns > div {
+  min-width: 0;
+}
+
+.create-payment-request-btn {
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+  grid-template-columns: 0.5fr 11.5fr;
+  height: 49px;
+  box-sizing: border-box;
+}
+
+.payment-request-cancel-prompt .rd-prompt-action-btns {
+  justify-content: center;
+  gap: 20px;
+}

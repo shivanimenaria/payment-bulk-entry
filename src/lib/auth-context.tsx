@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 
 type DataSource = "mock" | "real";
+type AuthMode = "handover" | "static_token";
 
 interface SessionData {
   orgId: string;
@@ -13,6 +14,8 @@ interface SessionData {
   displayName: string;
   // From /api/auth/me; null until the session loads. Drives the MOCK DATA badge.
   dataSource: DataSource | null;
+  // "static_token" = DEV-only real-data mode (UI badge "DEV — REAL DATA").
+  authMode: AuthMode | null;
   loading: boolean;
   error: string | null;
 }
@@ -24,6 +27,7 @@ const EMPTY_SESSION: SessionData = {
   vendorId: "",
   displayName: "",
   dataSource: null,
+  authMode: null,
   loading: true,
   error: null,
 };
@@ -61,6 +65,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             vendorId: data.vendorId || "",
             displayName: data.displayName || "",
             dataSource: data.dataSource === "mock" || data.dataSource === "real" ? data.dataSource : null,
+            authMode: data.authMode === "handover" || data.authMode === "static_token" ? data.authMode : null,
             loading: false,
             error: null,
           });

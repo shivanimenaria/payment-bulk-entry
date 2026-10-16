@@ -3,7 +3,9 @@
 import { CheckCircle2, AlertTriangle, Loader2, XCircle } from "lucide-react";
 import type { BulkSubmitResult } from "@/types/payments";
 import { fromPaise } from "@/lib/payments/money";
-import { formatINR, textOrDash } from "@/lib/format";
+import { formatMoney, textOrDash } from "@/lib/format";
+import { rdButtonPrimary, rdCard, rdCountLabel } from "@/components/rd/styles";
+import { cn } from "@/lib/utils";
 
 /** How a submitted row is identified in the lists (from the table at submit time). */
 export interface RowLabel {
@@ -12,7 +14,14 @@ export interface RowLabel {
 }
 
 export type SubmitOutcome =
-  | { kind: "result"; result: BulkSubmitResult; amounts: Map<string, number>; labels: Map<string, RowLabel> }
+  | {
+      kind: "result";
+      result: BulkSubmitResult;
+      amounts: Map<string, number>;
+      labels: Map<string, RowLabel>;
+      /** Rows' currency symbol at submit time (null = none / mixed). */
+      symbol: string | null;
+    }
   | { kind: "rejected"; summary: string[] }
   | { kind: "error"; message: string };
 
@@ -22,7 +31,9 @@ function Lines({
   labels,
   removed,
   tone,
+  symbol,
 }: {
+  symbol: string | null;
   items: { payment_request_id: string; error?: string }[];
   amounts: Map<string, number>;
   labels: Map<string, RowLabel>;
@@ -32,7 +43,7 @@ function Lines({
   return (
     <table className="w-full text-xs">
       <thead>
-        <tr className="text-left text-gray-500">
+        <tr className="text-left text-rd-muted">
           <th className="py-1 pr-4 font-medium">Request ID</th>
           <th className="py-1 pr-4 font-medium">Project</th>
           <th className="py-1 pr-4 text-right font-medium">Amount</th>
@@ -43,15 +54,15 @@ function Lines({
         {items.map((it) => {
           const p = amounts.get(it.payment_request_id);
           return (
-            <tr key={it.payment_request_id} className="border-t border-gray-100">
-              <td className="py-1 pr-4 font-medium text-gray-900">{textOrDash(labels.get(it.payment_request_id)?.requestNumber)}</td>
-              <td className="py-1 pr-4 text-gray-700">{textOrDash(labels.get(it.payment_request_id)?.projectName)}</td>
-              <td className="py-1 pr-4 text-right tabular-nums">{formatINR(p === undefined ? null : fromPaise(p))}</td>
+            <tr key={it.payment_request_id} className="border-t border-rd-divider">
+              <td className="py-1.5 pr-4 font-semibold text-rd-text">{textOrDash(labels.get(it.payment_request_id)?.requestNumber)}</td>
+              <td className="py-1.5 pr-4 text-rd-text">{textOrDash(labels.get(it.payment_request_id)?.projectName)}</td>
+              <td className="py-1.5 pr-4 text-right tabular-nums text-rd-text">{formatMoney(p === undefined ? null : fromPaise(p), symbol)}</td>
               {tone === "fail" ? (
-                <td className="py-1 text-red-700">
+                <td className="py-1.5 text-rd-red">
                   {it.error || "Not recorded"}
                   {removed?.has(it.payment_request_id) ? (
-                    <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">Removed — won&apos;t be retried</span>
+                    <span className={cn(rdCountLabel, "ml-2")}>Removed — won&apos;t be retried</span>
                   ) : null}
                 </td>
               ) : null}
@@ -83,7 +94,7 @@ export function SubmitResult({
 }) {
   if (outcome.kind === "error") {
     return (
-      <section role="alert" aria-label="Submit result" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+      <section role="alert" aria-label="Submit result" className={cn(rdCard, "flex items-start gap-2 p-[15px] text-[14px] font-semibold text-rd-red")}>
         <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
         <p>{outcome.message}</p>
       </section>
@@ -91,12 +102,12 @@ export function SubmitResult({
   }
   if (outcome.kind === "rejected") {
     return (
-      <section role="alert" aria-label="Submit result" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+      <section role="alert" aria-label="Submit result" className={cn(rdCard, "p-[15px] text-[14px] text-rd-red")}>
         <p className="flex items-center gap-2 font-semibold">
           <XCircle className="h-4 w-4" /> Nothing was recorded — the server rejected this submission.
         </p>
         {outcome.summary.length > 0 ? (
-          <ul className="mt-1 list-disc pl-6 text-xs">
+          <ul className="mt-1 list-disc pl-6 text-xs text-rd-text">
             {outcome.summary.map((m) => (
               <li key={m}>{m}</li>
             ))}
@@ -106,46 +117,46 @@ export function SubmitResult({
     );
   }
 
-  const { result, amounts, labels } = outcome;
+  const { result, amounts, labels, symbol: currencySymbol } = outcome;
   if (result.failed.length === 0) {
     return (
-      <section role="status" aria-label="Submit result" className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-        <CheckCircle2 className="h-4 w-4 shrink-0" />
+      <section role="status" aria-label="Submit result" className={cn(rdCard, "flex items-center gap-2 p-[15px] text-[14px] text-rd-text")}>
+        <CheckCircle2 className="h-4 w-4 shrink-0 text-rd-approved" />
         <p className="font-semibold">
-          {result.created.length} {result.created.length === 1 ? "payment" : "payments"} recorded · {formatINR(result.recordedAmount)}
+          {result.created.length} {result.created.length === 1 ? "payment" : "payments"} recorded · {formatMoney(result.recordedAmount, currencySymbol)}
         </p>
       </section>
     );
   }
   return (
-    <section role="alert" aria-label="Submit result" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+    <section role="alert" aria-label="Submit result" className={cn(rdCard, "p-[15px]")}>
       <div className="flex items-center justify-between gap-4">
-        <p className="flex items-center gap-2 text-sm font-semibold text-amber-900">
-          <AlertTriangle className="h-4 w-4" />
-          {formatINR(result.recordedAmount)} recorded, {formatINR(result.notRecordedAmount)} NOT recorded
+        <p className="flex items-center gap-2 text-sm font-semibold text-rd-text">
+          <AlertTriangle className="h-4 w-4 text-rd-pending" />
+          {formatMoney(result.recordedAmount, currencySymbol)} recorded, {formatMoney(result.notRecordedAmount, currencySymbol)} NOT recorded
         </p>
         <button
           type="button"
           onClick={onRetryFailed}
           disabled={busy || !canRetry}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+          className={rdButtonPrimary}
         >
           {retrying ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           Retry failed
         </button>
       </div>
       <div className="mt-3 grid gap-4 md:grid-cols-2">
-        <div className="rounded-md border border-gray-200 bg-white p-3">
-          <p className="mb-1 text-xs font-semibold text-green-800">Recorded ({result.created.length})</p>
+        <div className={cn(rdCard, "p-3")}>
+          <p className="mb-1 text-xs font-semibold text-rd-approved">Recorded ({result.created.length})</p>
           {result.created.length ? (
-            <Lines items={result.created} amounts={amounts} labels={labels} tone="ok" />
+            <Lines items={result.created} amounts={amounts} labels={labels} tone="ok" symbol={currencySymbol} />
           ) : (
-            <p className="text-xs text-gray-500">None</p>
+            <p className="text-xs text-rd-muted">None</p>
           )}
         </div>
-        <div className="rounded-md border border-red-200 bg-white p-3">
-          <p className="mb-1 text-xs font-semibold text-red-800">Not recorded ({result.failed.length})</p>
-          <Lines items={result.failed} amounts={amounts} labels={labels} removed={removed} tone="fail" />
+        <div className={cn(rdCard, "p-3")}>
+          <p className="mb-1 text-xs font-semibold text-rd-red">Not recorded ({result.failed.length})</p>
+          <Lines items={result.failed} amounts={amounts} labels={labels} removed={removed} tone="fail" symbol={currencySymbol} />
         </div>
       </div>
     </section>

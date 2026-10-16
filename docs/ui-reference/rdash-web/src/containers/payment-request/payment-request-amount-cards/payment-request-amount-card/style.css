@@ -1,0 +1,22 @@
+.payment-request-amount-card {
+  min-height: 84px;
+  position: relative;
+}
+
+.payment-request-count {
+  background-color: #eaeaea;
+  border-radius: 3px;
+  padding: 2px 3px;
+  box-sizing: border-box;
+}
+
+.payment-header-card-breakup-hint {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  white-space: nowrap;
+  background: #475467 0% 0% no-repeat padding-box;
+  box-shadow: 0px 3px 6px #00000029;
+  border-radius: 7px;
+  opacity: 1;
+}

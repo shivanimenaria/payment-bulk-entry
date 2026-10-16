@@ -1,10 +1,15 @@
 // Summary-card totals. Pure; integer paise throughout.
 import type { AllocationRow } from "@/types/payments";
-import { rowAmountPaise, toPaise } from "./money";
+import { parseRdashAmount, rowAmountPaise, toPaise } from "./money";
+import { rowAmountIssue } from "./allocation";
 
 export interface Totals {
-  /** Sum of payment_due over the rows; null if any due isn't valid money (renders "—"). */
+  /** Sum of payment_due over the processable rows (see unprocessableCount);
+   *  null only if that sum itself exceeds safe integer paise (renders "—"). */
   totalDuePaise: number | null;
+  /** Rows excluded from totals because an amount can't be processed
+   *  (too large / invalid — lib/payments/allocation.ts rowAmountIssue). */
+  unprocessableCount: number;
   /** Header Amount Paid; null while the input isn't valid money. */
   amountPaidPaise: number | null;
   /** Sum of valid row amounts (malformed inputs are excluded and flagged). */
@@ -19,12 +24,20 @@ export interface Totals {
 
 export function computeTotals(amountPaid: unknown, rows: AllocationRow[]): Totals {
   let totalDuePaise: number | null = 0;
+  let unprocessableCount = 0;
   let allocatedPaise = 0;
   let selectedCount = 0;
   let hasInvalidAmount = false;
   for (const row of rows) {
-    const due = toPaise(row.config.payment_due);
-    totalDuePaise = due === null || totalDuePaise === null ? null : totalDuePaise + due;
+    const due = parseRdashAmount(row.config.payment_due);
+    if (!due.ok || rowAmountIssue(row)) {
+      unprocessableCount++;
+      continue; // can't take a payment either (isAmountEditable)
+    }
+    if (totalDuePaise !== null) {
+      const sum: number = totalDuePaise + due.paise;
+      totalDuePaise = Number.isSafeInteger(sum) ? sum : null;
+    }
     const amount = rowAmountPaise(row.amount);
     if (amount === null) {
       hasInvalidAmount = true;
@@ -36,6 +49,7 @@ export function computeTotals(amountPaid: unknown, rows: AllocationRow[]): Total
   const amountPaidPaise = toPaise(amountPaid);
   return {
     totalDuePaise,
+    unprocessableCount,
     amountPaidPaise,
     allocatedPaise,
     excessPaise: amountPaidPaise === null ? null : amountPaidPaise - allocatedPaise,

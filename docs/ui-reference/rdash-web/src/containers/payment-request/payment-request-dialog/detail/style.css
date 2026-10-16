@@ -1,0 +1,22 @@
+.payment-request-detail > div {
+  width: 48%;
+}
+
+.payment-request-detail > div.request-detail-remark {
+  width: 100%;
+}
+
+.payment-request-detail-project-name .rd-input-readonly {
+  display: flex;
+  gap: 5px;
+}
+
+.payment-request-detail .request-detail-remark .rd-input-readonly {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
+
+.payment-request-detail-file-icon {
+  height: 18px;
+}

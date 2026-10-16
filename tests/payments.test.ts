@@ -8,11 +8,14 @@ import { paiseToInput } from "@/lib/payments/money";
 import type { AllocationRow, PaymentHeader, BulkSubmitResult } from "@/types/payments";
 import type { VendorPaymentRequestConfigItem } from "@/types/rdash";
 
-function cfg(id: string, due: number): VendorPaymentRequestConfigItem {
-  return { payment_request_id: id, status: "approved", request_amount: due, paid_amount: 0, payment_due: due, currency: {}, project_id: "p" };
+const INR = { id: "cur-inr", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" };
+/** rDash-shaped config item: amounts as 4-decimal strings, like the real API. */
+const dec4 = (n: number | string) => (typeof n === "string" ? n : (Math.round(n * 100) / 100).toFixed(4));
+function cfg(id: string, due: number | string): VendorPaymentRequestConfigItem {
+  return { payment_request_id: id, status: "approved", request_amount: dec4(due), paid_amount: "0", payment_due: dec4(due), currency: INR, project_id: "p" };
 }
 
-function row(id: string, due: number, amount = "", over: Partial<AllocationRow> = {}): AllocationRow {
+function row(id: string, due: number | string, amount = "", over: Partial<AllocationRow> = {}): AllocationRow {
   return {
     config: cfg(id, due),
     details: null,
@@ -263,6 +266,11 @@ describe("format", () => {
     expect(formatDate("2026-08-04T20:00:00Z")).toBe("05/08/2026"); // IST
     expect(formatDate(null)).toBe("—");
     expect(textOrDash("")).toBe("—");
+    const { formatCardINR } = await import("@/lib/format");
+    expect(formatCardINR(200000)).toBe("₹ 2,00,000");
+    expect(formatCardINR(29999.5)).toBe("₹ 29,999.50");
+    expect(formatCardINR(-70000)).toBe("₹ -70,000");
+    expect(formatCardINR(null)).toBe("—");
   });
 });
 
@@ -287,7 +295,7 @@ describe("submit flow helpers", () => {
     expect(out.map((r) => r.config.payment_request_id)).toEqual(["b", "c", "d"]);
     expect(out[0]).toMatchObject({ amount: "50", remark: "H", rowStatus: "failed", rowError: "Rejected" });
     expect(out[1]).toMatchObject({ amount: "", remark: "rc", remarkOverridden: true, rowStatus: "created", rowError: null });
-    expect(out[1].config.payment_due).toBe(50); // fresh due
+    expect(out[1].config.payment_due).toBe("50.0000"); // fresh due (rDash decimal string)
     expect(out[2]).toMatchObject({ amount: "", remark: "H", rowStatus: "idle" });
   });
 
@@ -349,5 +357,91 @@ describe("Remove a failed row", () => {
     const none = removeFailedId(afterA, "b");
     expect(buildRetryRequest(none, previous).rows).toEqual([]);
     expect(retryAmountPaid(none, previous)).toBe("");
+  });
+});
+
+describe("payable rule (lib/payments/payable.ts)", () => {
+  it("exact lowercase statuses only; missing / other / differently-cased → not payable", async () => {
+    const { PAYABLE_STATUSES, isPayableStatus, isPayable } = await import("@/lib/payments/payable");
+    expect([...PAYABLE_STATUSES]).toEqual(["pending", "approved", "submitted"]);
+    for (const s of ["pending", "approved", "submitted"]) expect(isPayableStatus(s)).toBe(true);
+    for (const s of ["rejected", "cancelled", "hold", "paid", "partially_paid", "Approved", " approved", "", null, undefined, 1]) {
+      expect(isPayableStatus(s)).toBe(false);
+    }
+    expect(isPayable({ status: "approved", payment_due: "0.0100" })).toBe(true);
+    expect(isPayable({ status: "approved", payment_due: "0" })).toBe(false);
+    expect(isPayable({ status: "approved", payment_due: "0.0" })).toBe(false);
+    expect(isPayable({ status: "hold", payment_due: "100.0000" })).toBe(false);
+    // Unprocessable due is NOT silently dropped — shown with an error instead.
+    expect(isPayable({ status: "approved", payment_due: "2000000000000000000000000000.0000" })).toBe(true);
+    expect(isPayable({ status: "approved", payment_due: "12.3456" })).toBe(true);
+  });
+
+  it("client validation blocks an amount on a non-payable row (same shared rule)", () => {
+    const r = validateAllocation(header("10"), [row("a", 100, "10", { config: { ...cfg("a", 100), status: "hold" } })]);
+    expect(r.errors.rows[0].amount).toBe(MESSAGES.notPayableStatus);
+  });
+});
+
+describe("rDash amounts (decimal strings)", () => {
+  it("parses rDash decimal strings exactly; sub-paisa / malformed → invalid; huge → too_large", async () => {
+    const { parseRdashAmount, rdashPaise, paiseToRdash } = await import("@/lib/payments/money");
+    expect(rdashPaise("29500.0000")).toBe(2950000);
+    expect(rdashPaise("0")).toBe(0);
+    expect(rdashPaise("0.0")).toBe(0);
+    expect(rdashPaise("11.0000")).toBe(1100);
+    expect(rdashPaise("12.3400")).toBe(1234);
+    expect(rdashPaise(29500)).toBe(2950000); // JSON numbers still accepted (details may use them)
+    for (const bad of ["12.3456", "12.345", "abc", "-1", "1e3", "", " ", null, undefined, {}, 0.1 + 0.2, -5]) {
+      expect(parseRdashAmount(bad)).toEqual({ ok: false, reason: "invalid" });
+    }
+    expect(parseRdashAmount("2000000000000000000000000000.0000")).toEqual({ ok: false, reason: "too_large" });
+    expect(parseRdashAmount("90071992547409.91")).toEqual({ ok: true, paise: Number.MAX_SAFE_INTEGER });
+    expect(parseRdashAmount("90071992547409.92")).toEqual({ ok: false, reason: "too_large" });
+    expect(paiseToRdash(2999950)).toBe("29999.5000");
+  });
+
+  it("formats on the digits (no float): Indian grouping, never rounds sub-paisa", async () => {
+    const { formatRdashAmount } = await import("@/lib/format");
+    expect(formatRdashAmount("29500.0000")).toBe("29,500.00");
+    expect(formatRdashAmount("0")).toBe("0.00");
+    expect(formatRdashAmount("12.3456")).toBe("12.3456");
+    expect(formatRdashAmount("2000000000000000000000000000.0000")).toBe("2,00,00,00,00,00,00,00,00,00,00,00,00,000.00");
+    expect(formatRdashAmount(null)).toBe("—");
+  });
+
+  it("a row whose amount is too large: shown with an error, locked, excluded from totals; server rejects it", async () => {
+    const { rowAmountIssue, isAmountEditable, payInFull } = await import("@/lib/payments/allocation");
+    const huge = "2000000000000000000000000000.0000";
+    const big = row("big", 0, "", { config: { ...cfg("big", huge), request_amount: huge } });
+    const normal = row("ok", 100, "100");
+    expect(rowAmountIssue(big)).toBe("Amount too large to process");
+    expect(isAmountEditable(big)).toBe(false);
+    expect(payInFull(big)).toBe(big);
+    const t = computeTotals("100", [big, normal]);
+    expect(t).toMatchObject({ totalDuePaise: 10000, unprocessableCount: 1, allocatedPaise: 10000, excessPaise: 0 });
+    // Client: an amount forced onto the row is still rejected.
+    const forced = validateAllocation(header("1"), [{ ...big, amount: "1" }]);
+    expect(forced.errors.rows[0].amount).toBe("Amount too large to process");
+    // Server: fresh config with the huge due → 400 field error, never compared as a float.
+    const server = validateSubmission(
+      { header: header("1"), rows: [{ payment_request_id: "big", amount: "1", remark: null }] },
+      [big.config],
+    );
+    expect(server.ok).toBe(false);
+    expect(server.errors.rows[0].payment_request_id).toBe("Amount too large to process");
+  });
+
+  it("an invalid (sub-paisa) rDash due is shown with an error, never rounded", async () => {
+    const { rowAmountIssue } = await import("@/lib/payments/allocation");
+    expect(rowAmountIssue(row("x", 0, "", { config: { ...cfg("x", "12.3456") } }))).toBe("Invalid amount from rDash");
+  });
+
+  it("bulk entry amount is a number with at most 2 decimals", () => {
+    const r = validateAllocation(header("29500.5"), [row("a", "29500.5000", "29500.50")]);
+    if (!r.ok) throw new Error(r.summary.join("; "));
+    const [e] = buildBulkEntries(r.value);
+    expect(e.amount).toBe(29500.5);
+    expect(typeof e.amount).toBe("number");
   });
 });

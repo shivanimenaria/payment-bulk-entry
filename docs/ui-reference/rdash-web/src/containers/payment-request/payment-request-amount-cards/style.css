@@ -1,0 +1,4 @@
+.payment-request-amount-cards-wrapper {
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+}

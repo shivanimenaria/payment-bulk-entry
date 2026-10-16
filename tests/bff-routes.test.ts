@@ -7,6 +7,7 @@ import { GET as requestsGET } from "@/app/api/rdash/payment-requests/route";
 import { POST as bulkPOST } from "@/app/api/rdash/payment-entries/bulk/route";
 import { resetMockState } from "@/lib/server/rdash-source/mock";
 import detailsJson from "@/lib/server/rdash-source/mock-data/details.json";
+import { rdashPaise } from "@/lib/payments/money";
 
 const APP = "https://pbe.example.com";
 const API = "https://rdash-api.example.com";
@@ -19,20 +20,27 @@ const ok = (data: unknown, status = 200) =>
   new Response(JSON.stringify({ success: true, code: status, message: "", errors: null, data }), { status });
 
 // Fresh server-side config for the session vendor (33).
+// Real rDash shapes: decimal-string amounts, currency object (see
+// tests/fixtures/real-config-page.json). PR3 omits project_id (now required
+// by Swagger) to exercise the defensive detailsUnavailable path.
+const INR = { id: "9ng3XGvlNqK8oJ4V", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" };
 const SERVER_CONFIG = [
-  { payment_request_id: "PR1", status: "approved", request_amount: 1000, paid_amount: 0, payment_due: 1000, currency: {}, project_id: "PJ1" },
-  { payment_request_id: "PR2", status: "approved", request_amount: 800, paid_amount: 300, payment_due: 500, currency: {}, project_id: "PJ1" },
-  { payment_request_id: "PR3", status: "approved", request_amount: 200, paid_amount: 0, payment_due: 200.5, currency: {} },
-  { payment_request_id: "PR0", status: "paid", request_amount: 50, paid_amount: 50, payment_due: 0, currency: {}, project_id: "PJ1" },
+  { payment_request_id: "PR1", status: "approved", request_amount: "1000.0000", paid_amount: "0", payment_due: "1000.0000", currency: INR, project_id: "PJ1" },
+  { payment_request_id: "PR2", status: "approved", request_amount: "800.0000", paid_amount: "300.0000", payment_due: "500.0000", currency: INR, project_id: "PJ1" },
+  { payment_request_id: "PR3", status: "approved", request_amount: "200.5000", paid_amount: "0", payment_due: "200.5000", currency: INR },
+  { payment_request_id: "PR0", status: "approved", request_amount: "50.0000", paid_amount: "50.0000", payment_due: "0", currency: INR, project_id: "PJ1" },
 ];
 
+// Config the rDash stub serves (reset per test).
+let serverConfig: Record<string, unknown>[] = SERVER_CONFIG;
 let fetchMock: ReturnType<typeof vi.fn>;
 let bulkResponse: () => Response;
 let cookie: string;
 
 function rdashStub(url: string, init?: RequestInit): Response {
   const u = new URL(url);
-  if (u.pathname === CONFIG_PATH) return ok({ count: SERVER_CONFIG.length, data: SERVER_CONFIG });
+  // DRF pagination (single page here; multi-page paging is tested in rdash-source.test.ts).
+  if (u.pathname === CONFIG_PATH) return ok({ count: serverConfig.length, next: null, previous: null, results: serverConfig });
   if (u.pathname === "/v2/projects") return ok([{ id: "PJ1", job_id: "J", name: "Tower One", created_at: "", is_archived: false, is_deleted: false }]);
   if (u.pathname === "/v2/projects/PJ1/vendor-payment-requests/PR2") return new Response("boom", { status: 500 });
   if (u.pathname.startsWith("/v2/projects/PJ1/vendor-payment-requests/")) {
@@ -77,6 +85,7 @@ beforeEach(async () => {
   delete process.env.MOCK_FAIL_IDS;
   resetMockState();
   cookie = await makeSessionCookie({ vendorId: "33" });
+  serverConfig = SERVER_CONFIG;
   bulkResponse = () => ok({ count: 0, created: [], failed: [] });
   fetchMock = vi.fn(async (url: string, init?: RequestInit) => rdashStub(url, init));
   vi.stubGlobal("fetch", fetchMock);
@@ -256,6 +265,104 @@ describe("POST /api/rdash/payment-entries/bulk (real)", () => {
   });
 });
 
+describe("payable-status filter (lib/payments/payable.ts)", () => {
+  const item = (id: string, status: unknown, due: number) => {
+    const c: Record<string, unknown> = {
+      payment_request_id: id,
+      request_amount: "100.0000",
+      paid_amount: `${100 - due}.0000`,
+      payment_due: due === 0 ? "0" : `${due}.0000`,
+      currency: INR,
+      project_id: "PJ1",
+    };
+    if (status !== undefined) c.status = status;
+    return c;
+  };
+  const MIXED = [
+    item("P-PENDING", "pending", 10),
+    item("P-APPROVED", "approved", 20),
+    item("P-SUBMITTED", "submitted", 30),
+    item("X-REJECTED", "rejected", 40),
+    item("X-CANCELLED", "cancelled", 50),
+    item("X-HOLD", "hold", 60),
+    item("X-UNKNOWN", "partially_paid", 70),
+    item("X-CASE", "Approved", 80),
+    item("X-MISSING", undefined, 90),
+    item("X-DUE0", "approved", 0),
+  ];
+
+  it("GET keeps only pending/approved/submitted with due > 0; the rest never get a details call", async () => {
+    serverConfig = MIXED;
+    const res = await get(requestsGET, "/api/rdash/payment-requests");
+    expect(res.status).toBe(200);
+    const { rows } = await res.json();
+    expect(rows.map((r: { config: { payment_request_id: string } }) => r.config.payment_request_id)).toEqual([
+      "P-PENDING",
+      "P-APPROVED",
+      "P-SUBMITTED",
+    ]);
+    const detailIds = fetchMock.mock.calls
+      .map((c) => new URL(c[0]).pathname)
+      .filter((p) => p.startsWith("/v2/projects/PJ1/vendor-payment-requests/"))
+      .map((p) => p.split("/").pop());
+    expect(detailIds.sort()).toEqual(["P-APPROVED", "P-PENDING", "P-SUBMITTED"]);
+  });
+
+  it("a payable row whose amount is too large is returned (with the page intact), not dropped", async () => {
+    const huge = "2000000000000000000000000000.0000";
+    serverConfig = [
+      ...MIXED.slice(0, 1),
+      { ...item("P-HUGE", "approved", 1), request_amount: huge, payment_due: huge },
+    ];
+    const res = await get(requestsGET, "/api/rdash/payment-requests");
+    expect(res.status).toBe(200);
+    const { rows } = await res.json();
+    expect(rows.map((r: { config: { payment_request_id: string } }) => r.config.payment_request_id)).toEqual(["P-PENDING", "P-HUGE"]);
+    expect(rows[1].config.payment_due).toBe(huge); // passed through exactly, as a string
+  });
+
+  it.each(["X-REJECTED", "X-CANCELLED", "X-HOLD", "X-UNKNOWN", "X-CASE", "X-MISSING"])(
+    "bulk: %s (non-payable status) → 400, bulk API not called",
+    async (id) => {
+      serverConfig = MIXED;
+      const res = await post({ header: header("1"), rows: [{ payment_request_id: id, amount: "1", remark: null }] });
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.rows[0].payment_request_id).toBe(
+        "This payment request can't be paid in its current status",
+      );
+      expect(bulkCalls()).toHaveLength(0);
+    },
+  );
+
+  it("bulk: one non-payable row rejects the whole submission (payable row not sent either)", async () => {
+    serverConfig = MIXED;
+    const res = await post({
+      header: header("11"),
+      rows: [
+        { payment_request_id: "P-PENDING", amount: "10", remark: null },
+        { payment_request_id: "X-HOLD", amount: "1", remark: null },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(bulkCalls()).toHaveLength(0);
+  });
+
+  it("bulk: pending + submitted rows are accepted", async () => {
+    serverConfig = MIXED;
+    bulkResponse = () =>
+      ok({ count: 2, created: [{ id: "E1", payment_request_id: "P-PENDING" }, { id: "E2", payment_request_id: "P-SUBMITTED" }], failed: [] });
+    const res = await post({
+      header: header("40"),
+      rows: [
+        { payment_request_id: "P-PENDING", amount: "10", remark: null },
+        { payment_request_id: "P-SUBMITTED", amount: "30", remark: null },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(bulkCalls()).toHaveLength(1);
+  });
+});
+
 describe("RDASH_TEMP_PROJECT_ID (TODO(remove-temp-project-id))", () => {
   afterEach(() => {
     delete process.env.RDASH_TEMP_PROJECT_ID;
@@ -294,7 +401,7 @@ describe("mock mode", () => {
   it("payment-requests → 5 rows (due-0 request hidden), total due 200000", async () => {
     const { rows } = await (await get(requestsGET, "/api/rdash/payment-requests", false)).json();
     expect(rows).toHaveLength(5);
-    expect(rows.reduce((s: number, r: { config: { payment_due: number } }) => s + r.config.payment_due, 0)).toBe(200000);
+    expect(rows.reduce((s: number, r: { config: { payment_due: string } }) => s + rdashPaise(r.config.payment_due)!, 0)).toBe(20000000);
     expect(rows.some((r: { config: { payment_request_id: string } }) => r.config.payment_request_id === "mock-pr-106")).toBe(false);
   });
 

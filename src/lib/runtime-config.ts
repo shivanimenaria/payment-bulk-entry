@@ -103,13 +103,67 @@ export function resolveTempProjectId(env: Env): string | null {
   return id;
 }
 
+// ── RDASH_AUTH_MODE (DEV-ONLY static token) ─────────────────
+// "handover" (or unset) = the normal embedded handover flow.
+// "static_token" = DEV ONLY, for testing against the real rDash API before the
+// embedded app is registered: no handover, a fixed dev session whose vendor
+// is RDASH_DEV_VENDOR_ID, every rDash call uses RDASH_DEV_API_TOKEN with
+// RDASH_DEV_AUTH_SCHEME, NO token refresh, ids passed to rDash exactly as
+// given (no PBE-salt decode/encode). Writes (bulk POST) are blocked unless
+// RDASH_DEV_ALLOW_WRITES=true. Fail closed:
+//   - NODE_ENV=production                    → error
+//   - RDASH_DATA_SOURCE must be "real"
+//   - RDASH_DEV_API_TOKEN / RDASH_DEV_AUTH_SCHEME / RDASH_DEV_VENDOR_ID /
+//     RDASH_API_URL required (no defaults)
+//   - RDASH_DEV_* set without static_token, or RDASH_DEV_ALLOW_WRITES ≠ "true" → error
+export type AuthMode = "handover" | "static_token";
+
+const DEV_VARS = ["RDASH_DEV_API_TOKEN", "RDASH_DEV_AUTH_SCHEME", "RDASH_DEV_VENDOR_ID", "RDASH_DEV_ALLOW_WRITES"] as const;
+
+export function resolveAuthMode(env: Env): AuthMode {
+  const raw = env.RDASH_AUTH_MODE || undefined;
+  if (raw !== undefined && raw !== "handover" && raw !== "static_token") {
+    throw new Error('RDASH_AUTH_MODE must be "handover", "static_token" or unset');
+  }
+  if (raw !== "static_token") {
+    const stray = DEV_VARS.filter((k) => env[k]);
+    if (stray.length) throw new Error(`${stray.join(", ")} must not be set unless RDASH_AUTH_MODE=static_token`);
+    return "handover";
+  }
+  if (env.NODE_ENV === "production") {
+    throw new Error("RDASH_AUTH_MODE=static_token is dev-only and not allowed with NODE_ENV=production");
+  }
+  if (env.RDASH_DATA_SOURCE !== "real") {
+    throw new Error("RDASH_AUTH_MODE=static_token requires RDASH_DATA_SOURCE=real");
+  }
+  const missing = ["RDASH_DEV_API_TOKEN", "RDASH_DEV_AUTH_SCHEME", "RDASH_DEV_VENDOR_ID", "RDASH_API_URL"].filter((k) => !env[k]);
+  if (missing.length) throw new Error(`RDASH_AUTH_MODE=static_token requires ${missing.join(", ")}`);
+  if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(env.RDASH_DEV_AUTH_SCHEME as string)) {
+    throw new Error("RDASH_DEV_AUTH_SCHEME must be a single word, e.g. Bearer");
+  }
+  const writes = env.RDASH_DEV_ALLOW_WRITES || undefined;
+  if (writes !== undefined && writes !== "true") throw new Error('RDASH_DEV_ALLOW_WRITES must be "true" or unset');
+  return "static_token";
+}
+
+/** Static-token dev settings. Only call when resolveAuthMode() is "static_token". */
+export function devStaticTokenConfig(env: Env): { token: string; scheme: string; vendorId: string; allowWrites: boolean } {
+  return {
+    token: env.RDASH_DEV_API_TOKEN as string,
+    scheme: env.RDASH_DEV_AUTH_SCHEME as string,
+    vendorId: env.RDASH_DEV_VENDOR_ID as string,
+    allowWrites: env.RDASH_DEV_ALLOW_WRITES === "true",
+  };
+}
+
 /** Startup check (instrumentation.ts). Throws on any invalid configuration. */
 export function validateRuntimeConfig(env: Env): DataSource {
   parseCookieSecret(env.COOKIE_SECRET);
   const source = resolveDataSource(env);
-  // Real mode compares the handover's app_slug with this (/api/session).
-  // Mock mode skips that check, so it isn't required there.
-  if (source === "real" && !env.RDASH_PBE_TAB_CODE) {
+  const authMode = resolveAuthMode(env);
+  // Real handover mode compares the handover's app_slug with this
+  // (/api/session). Mock mode and dev static-token mode (no handover) skip it.
+  if (source === "real" && authMode === "handover" && !env.RDASH_PBE_TAB_CODE) {
     throw new Error("RDASH_PBE_TAB_CODE must be set when RDASH_DATA_SOURCE=real");
   }
   resolveTempProjectId(env); // TODO(remove-temp-project-id)

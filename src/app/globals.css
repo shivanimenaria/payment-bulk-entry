@@ -29,7 +29,7 @@
     --card-foreground: 0 0% 3.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 0 0% 3.9%;
-    --primary: 1.36 77.19% 55.29%; /* #E53935 (CLAUDE.md red primary) */
+    --primary: 358.51 84.17% 52.94%; /* #ec2227 (rDash --theme-brand-color-primary) */
     --primary-foreground: 0 0% 98%;
     --secondary: 0 0% 96.1%;
     --secondary-foreground: 0 0% 9%;
@@ -41,8 +41,32 @@
     --destructive-foreground: 0 0% 98%;
     --border: 0 0% 85%;
     --input: 0 0% 85%;
-    --ring: 1.36 77.19% 55.29%;
+    --ring: 358.51 84.17% 52.94%;
     --radius: 0.5rem;
+
+    /* rDash look (Manage Vendor → Vendor Payments). Exact values from
+       docs/ui-reference/rdash-web/src/styles/global-style.css (--theme-brand-*),
+       the payment-request components, and pixel samples of the reference
+       screenshots (filter-input fill, page background). */
+    --rd-red: #ec2227;               /* --theme-brand-color-primary / -danger */
+    --rd-text: #344054;              /* --theme-brand-color-dark-grey-blue (.text-344054) */
+    --rd-black: #000000;             /* table / stepper / tab text */
+    --rd-muted: #98a2b3;             /* .text-98a2b3 */
+    --rd-placeholder: #98a2b3;       /* filter-input placeholder + icons */
+    --rd-chevron: #c3c3c3;           /* select chevron in filter inputs */
+    --rd-border: #c7c8c9;            /* --theme-brand-border-color-primary (.border, .border-b) */
+    --rd-border-secondary: #e3e3e3;  /* --theme-brand-border-color-secondary */
+    --rd-disabled: #d0d5dd;          /* --theme-brand-border-color-disabled-primary (.text-d0d5dd) */
+    --rd-divider: #c7c8c9;           /* row dividers use .border-b */
+    --rd-fill: #f4f6f9;              /* filter-input fill (screenshot sample) */
+    --rd-page: #f9fafb;              /* page background (.bg-f9fafb, screenshot sample) */
+    --rd-label: #eaeaea;             /* count label (.payment-request-count) */
+    --rd-row-error: #fff8f8;         /* .bg-fff8f8 */
+    --rd-approved: rgb(97 199 205);  /* --theme-brand-color-approved */
+    --rd-pending: rgb(234 146 69);   /* --theme-brand-color-pending */
+    --rd-rejected: rgb(236 67 67);   /* --theme-brand-color-rejected */
+    --rd-hold: rgb(242 177 80);      /* --theme-brand-color-hold */
+    --rd-radius: 6px;                /* .rounded-6 */
     --font-stack: Gilroy, system-ui, -apple-system, sans-serif;
 
     --type-display-size: 6rem;
@@ -259,4 +283,16 @@
     letter-spacing: 0.10em;
     text-transform: uppercase;
   }
+}
+
+/* rDash filter-style date input: the native picker indicator is stretched
+   (invisible) over the whole field so a click anywhere still opens it, while
+   the visible icon is rDash's calendar on the left. */
+.rd-date::-webkit-calendar-picker-indicator {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  opacity: 0;
+  cursor: pointer;
 }

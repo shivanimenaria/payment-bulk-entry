@@ -1,0 +1,11 @@
+.payment-request-amount-summary {
+  border-radius: 6px;
+  padding: 6px 10px;
+  border: dashed 1px rgba(236, 34, 39, 0.3);
+  background-color: rgba(236, 34, 39, 0.08);
+  box-sizing: border-box;
+}
+
+.payment-request-percent-input {
+  max-width: 400px;
+}
