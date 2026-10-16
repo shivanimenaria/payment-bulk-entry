@@ -9,7 +9,9 @@
  *   1. GET /v2/vendors?name=<arg>                       (raw response)
  *   2. GET /v2/vendor-payment-requests/config/?vendor_id=RDASH_DEV_VENDOR_ID
  *      — every page, following `next` until null
- *   3. GET /v2/projects/{project_id}/vendor-payment-requests/{id}
+ *   3. GET /v2/projects?limit=10&offset=0                (first page only —
+ *      confirms the DRF shape; the org may have hundreds of projects)
+ *   4. GET /v2/projects/{project_id}/vendor-payment-requests/{id}
  *      for the first payable row (pending/approved/submitted, due > 0)
  * GET requests only — it NEVER calls the bulk POST. The token is never
  * printed: any occurrence in output is replaced with ***REDACTED***.
@@ -87,7 +89,15 @@ async function main() {
   }
   console.log(`\nconfig: ${rows.length} row(s) collected, count = ${count}${rows.length === count ? "" : "  ← MISMATCH"}`);
 
-  // 3. Details for the first payable row
+  // 3. Projects — first page only
+  const projects = await get(`${base}/v2/projects?limit=10&offset=0`);
+  print(`GET /v2/projects?limit=10&offset=0 (first page) → HTTP ${projects.status}`, projects.json ?? projects.text);
+  const pd = (projects.json as { data?: { count?: unknown; next?: unknown; results?: unknown } } | null)?.data;
+  console.log(
+    `\nprojects shape: ${pd && Array.isArray(pd.results) && typeof pd.count === "number" ? `DRF (count ${pd.count}, next ${pd.next ? "set" : "null"})` : "NOT the DRF { count, next, previous, results } shape"}`,
+  );
+
+  // 4. Details for the first payable row
   const first = rows.find(isPayable);
   if (!first) {
     console.log("\nNo payable row (pending/approved/submitted with payment_due > 0) — details not fetched.");

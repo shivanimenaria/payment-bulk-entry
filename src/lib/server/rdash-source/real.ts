@@ -7,7 +7,9 @@ import type {
   RdashProject,
   VendorPaymentRequestConfigItem,
 } from "@/types/rdash";
-import { apiFetch, paginateRdash, paginateRdashDrf } from "../api";
+import { createHash } from "node:crypto";
+import { apiFetch, paginateRdashDrf } from "../api";
+import { DedupeCache } from "../dedupe-cache";
 import { encodeRdashId } from "../rdash-id";
 import type { RdashSource } from "./types";
 
@@ -32,13 +34,44 @@ export function buildBulkBody(
   return BULK_BODY_WRAPPER === "entries" ? body : { data: body };
 }
 
+// /v2/projects is org-wide (809 projects in the prod org) and has no known id
+// filter, so the full list is paged once and cached in server memory per
+// token for 5 minutes (never sent to the browser — only resolved names reach
+// rows). Keyed by a SHA-256 of the token (the raw token is never a key).
+// On globalThis: `next dev` gives each route its own module instance.
+// TODO(verify): an id filter on /v2/projects would avoid full paging
+// (docs/api-notes.md → #18).
+const PROJECTS_TTL_MS = 5 * 60 * 1000;
+const PROJECTS_CACHE_KEY = "__pbeRdashProjectsCache__";
+type GlobalWithProjects = typeof globalThis & { [PROJECTS_CACHE_KEY]?: DedupeCache<RdashProject[]> };
+
+function projectsCache(): DedupeCache<RdashProject[]> {
+  const g = globalThis as GlobalWithProjects;
+  if (!g[PROJECTS_CACHE_KEY]) g[PROJECTS_CACHE_KEY] = new DedupeCache<RdashProject[]>(PROJECTS_TTL_MS, 100, () => Date.now());
+  return g[PROJECTS_CACHE_KEY];
+}
+
+/** Test helper. */
+export function clearProjectsCache(): void {
+  delete (globalThis as GlobalWithProjects)[PROJECTS_CACHE_KEY];
+}
+
+const tokenKey = (token: string) => createHash("sha256").update(token).digest("hex");
+
 export function createRealSource(accessToken: string, opts?: { rawVendorId?: boolean }): RdashSource {
   if (!accessToken) throw new Error("createRealSource: missing access token");
   return {
     async listProjects(): Promise<RdashProject[]> {
-      // Ids pass through untouched (NO decodeIdField): allocation-rows.ts
-      // matches them against config project_id, which is also passed through.
-      return paginateRdash<RdashProject>("/v2/projects", accessToken);
+      // DRF pagination (confirmed from a real response): results + next +
+      // count, strict. Ids pass through untouched (NO decodeIdField):
+      // allocation-rows.ts matches them against config project_id.
+      // Only called when some row has a project_id (allocation-rows.ts).
+      const key = tokenKey(accessToken);
+      const cached = projectsCache().get(key);
+      if (cached) return cached;
+      const projects = await paginateRdashDrf<RdashProject>("/v2/projects", accessToken);
+      projectsCache().set(key, projects); // only successful, complete lists are cached
+      return projects;
     },
 
     async listPaymentRequestConfig(vendorId: string): Promise<VendorPaymentRequestConfigItem[]> {

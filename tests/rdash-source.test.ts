@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vite
 import Hashids from "hashids";
 import { setAuthEnv, TEST_SALT } from "./helpers";
 import { createMockSource, resetMockState, MockVendorNotFoundError } from "@/lib/server/rdash-source/mock";
-import { createRealSource, buildBulkBody, BULK_BODY_WRAPPER } from "@/lib/server/rdash-source/real";
+import { createRealSource, buildBulkBody, BULK_BODY_WRAPPER, clearProjectsCache } from "@/lib/server/rdash-source/real";
 import { loadAllocationRows, DETAILS_ERROR_MESSAGE } from "@/lib/server/rdash-source/allocation-rows";
 import { getRdashSource } from "@/lib/server/rdash-source";
 import type { RdashSource } from "@/lib/server/rdash-source/types";
@@ -48,6 +48,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   resetMockState();
+  clearProjectsCache();
   delete process.env.MOCK_FAIL_IDS;
   for (const m of ["log", "warn", "error"] as const) vi.spyOn(console, m).mockImplementation(() => {});
 });
@@ -465,11 +466,22 @@ describe("real source: project names with hashid ids", () => {
           ],
         });
       }
+      // Real /v2/projects shape: DRF, 2 pages — the needed project is on page 2.
       if (u.pathname === "/v2/projects") {
-        return ok([
-          { id: P6, job_id: "J6", name: "Other Project", created_at: "", is_archived: false, is_deleted: false },
-          { id: P5, job_id: "J5", name: "Tower Five", created_at: "", is_archived: false, is_deleted: false },
-        ]);
+        if (u.searchParams.get("offset") === "0") {
+          return ok({
+            count: 2,
+            next: `${API}/v2/projects?limit=1&offset=1`,
+            previous: null,
+            results: [{ id: P6, job_id: "J6", name: "Other Project", created_at: "", is_archived: false, is_deleted: false }],
+          });
+        }
+        return ok({
+          count: 2,
+          next: null,
+          previous: `${API}/v2/projects?limit=1&offset=0`,
+          results: [{ id: P5, job_id: "J5", name: "Tower Five", created_at: "", is_archived: false, is_deleted: false }],
+        });
       }
       if (u.pathname === `/v2/projects/${P5}/vendor-payment-requests/${PR}`) return ok({ ...detailsJson[0], id: PR });
       return new Response("unexpected " + u.pathname, { status: 404 });
@@ -481,6 +493,69 @@ describe("real source: project names with hashid ids", () => {
     expect(rows[0]).toMatchObject({ projectName: "Tower Five", detailsUnavailable: false, detailsError: null });
     expect(rows[0].config.project_id).toBe(P5);
     expect(rows[0].details?.id).toBe(PR);
+    // Both DRF pages were read (`next` followed).
+    const projectCalls = fetchMock.mock.calls.map((c) => new URL(c[0])).filter((u) => u.pathname === "/v2/projects");
+    expect(projectCalls.map((u) => u.searchParams.get("offset"))).toEqual(["0", "1"]);
+  });
+});
+
+describe("real source: /v2/projects cache (5 min, per token, server-side)", () => {
+  const ok = (data: unknown) =>
+    new Response(JSON.stringify({ success: true, code: 200, message: "", errors: null, data }), { status: 200 });
+  const projectsPage = () => ok({ count: 1, next: null, previous: null, results: [{ id: "PJ1", job_id: "J", name: "Tower", created_at: "", is_archived: false, is_deleted: false }] });
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const projectCalls = () => fetchMock.mock.calls.filter((c) => new URL(c[0]).pathname === "/v2/projects").length;
+
+  beforeEach(() => {
+    clearProjectsCache();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-16T10:00:00Z"));
+    fetchMock = vi.fn(async () => projectsPage());
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("second load within 5 minutes makes no /v2/projects call; after 5 minutes it refetches", async () => {
+    expect((await createRealSource("tok-A").listProjects())[0].name).toBe("Tower");
+    expect(projectCalls()).toBe(1);
+    vi.setSystemTime(new Date("2026-10-16T10:04:59Z"));
+    expect((await createRealSource("tok-A").listProjects())[0].name).toBe("Tower");
+    expect(projectCalls()).toBe(1); // cached
+    vi.setSystemTime(new Date("2026-10-16T10:05:01Z"));
+    await createRealSource("tok-A").listProjects();
+    expect(projectCalls()).toBe(2); // expired → refetched
+  });
+
+  it("cache is per token (another token never sees it); failures are not cached", async () => {
+    await createRealSource("tok-A").listProjects();
+    await createRealSource("tok-B").listProjects();
+    expect(projectCalls()).toBe(2);
+    fetchMock.mockImplementationOnce(async () => new Response("boom", { status: 500 }));
+    await expect(createRealSource("tok-C").listProjects()).rejects.toThrow();
+    await createRealSource("tok-C").listProjects();
+    expect(projectCalls()).toBe(4); // the failed attempt left nothing behind
+  });
+
+  it("through loadAllocationRows: a second load within 5 min doesn't call /v2/projects", async () => {
+    const cfgPage = ok({
+      count: 1,
+      next: null,
+      previous: null,
+      results: [{ payment_request_id: "PR1", project_id: "PJ1", status: "approved", request_amount: "1.0000", paid_amount: "0", payment_due: "1.0000", currency: { id: "c", name: "INR", symbol: "₹", code: "INR" } }],
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === "/v2/vendor-payment-requests/config/") return cfgPage.clone();
+      if (u.pathname === "/v2/projects") return projectsPage();
+      return ok({ ...detailsJson[0], id: "PR1" });
+    });
+    const first = await loadAllocationRows(createRealSource("tok-A"), "33");
+    const second = await loadAllocationRows(createRealSource("tok-A"), "33");
+    expect(first[0].projectName).toBe("Tower");
+    expect(second[0].projectName).toBe("Tower");
+    expect(projectCalls()).toBe(1);
   });
 });
 
@@ -496,6 +571,21 @@ describe("paginateRdash page cap", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(paginateRdash("/v2/projects", "tok")).rejects.toBeInstanceOf(RdashResponseShapeError);
     expect(fetchMock).toHaveBeenCalledTimes(200);
+  });
+
+  it("a DRF-shaped response (e.g. /v2/vendors) is paged via next — page 1 not requested twice; unknown shapes still throw", async () => {
+    const drfPage = (results: unknown[], next: string | null) =>
+      new Response(JSON.stringify({ success: true, data: { count: 3, next, previous: null, results } }), { status: 200 });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(drfPage([{ id: "V1" }, { id: "V2" }], `${API}/v2/vendors?limit=2&offset=2`))
+      .mockResolvedValueOnce(drfPage([{ id: "V3" }], null));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await paginateRdash<{ id: string }>("/v2/vendors", "tok")).map((v) => v.id)).toEqual(["V1", "V2", "V3"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ success: true, data: { items: [] } }), { status: 200 })));
+    await expect(paginateRdash("/v2/vendors", "tok")).rejects.toBeInstanceOf(RdashResponseShapeError);
   });
 
   it("normal stops still return: short last page, and ignored-pagination detection", async () => {

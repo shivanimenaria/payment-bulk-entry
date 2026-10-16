@@ -190,14 +190,14 @@ Base: `RDASH_API_URL`. List endpoints **must** go through `paginateRdash` — ne
 | `POST /api/v1/auth/embedded/handover/consume/` | Handover code → tokens | client_assertion (JWT) |
 | `POST /api/v1/auth/token/` | Refresh | refresh_token grant |
 | `GET /v2/vendors` | Server-side vendor verification only (`assertVendorInOrg`) — never shown as a dropdown | `CAN_ACCESS_MANAGE_VENDOR` (per RFQ docs; **verify**) |
-| `GET /v2/projects` | Project names for the Project Name column | auth-only |
+| `GET /v2/projects` | Project names for the Project Name column — **DRF paginated** (confirmed, 809 in the prod org); fetched only when a row has a `project_id`, id → name list cached server-side per token for 5 min (no id filter known — api-notes #18) | auth-only |
 | `GET /v2/vendor-payment-requests/config/?vendor_id&limit&offset&payment_request_ids` | Vendor's payment requests (all projects) + amounts | **TBD** |
 | `GET /v2/projects/{pid}/vendor-payment-requests/{payment_request_id}` | Request details for table columns | **TBD** |
 | `POST /v2/vendor-payment-requests/payment-entries/bulk/` | Create payment entries | **TBD** |
 
 ### Response fields (corrected Swagger + a real production response — only these exist; never invent fields)
 - **Vendors**: `id, name, code`
-- **Projects**: `id, job_id, name, created_at, is_archived, is_deleted`
+- **Projects** (DRF page, like config): `results[]` → `id, job_id, name, created_at, is_archived, is_deleted`
 - **Config** (`PaginatedVendorPaymentRequestConfigOutputEntity`) — **DRF pagination**: `{ data: { count, next, previous, results[] } }` (real sample: `tests/fixtures/real-config-page.json`). `results[]` → `payment_request_id, project_id (required), status, request_amount, paid_amount, payment_due, currency { id: string|null, name, symbol, code, locale? }`. Paged by `paginateRdashDrf`: follow `next` until null (same origin/path as `RDASH_API_URL` only), total must equal `count`, else `RdashResponseShapeError`.
 - **Money**: amounts are **decimal strings** with up to 4 decimals (`"29500.0000"`, `"0"`, `"0.0"`); details amounts may be strings or numbers. Parse ONLY with `parseRdashAmount` (`lib/payments/money.ts`): exact integer paise when digits beyond 2 decimals are zero; sub-paisa / malformed → invalid (never rounded); beyond `Number.MAX_SAFE_INTEGER` paise → too large. Such a row shows "Amount too large to process" / "Invalid amount from rDash", can't take a payment, is excluded from totals (with a note), and is rejected by the server. Display via `formatRdashAmount` (digit-string based, exact for any size). Currency symbol from `currency.symbol` (`lib/payments/currency.ts`).
 - **Statuses seen**: approved, pending, submitted, cancelled.

@@ -5,6 +5,7 @@ import { resolveAuthMode, validateRuntimeConfig } from "@/lib/runtime-config";
 import { GET as meGET } from "@/app/api/auth/me/route";
 import { GET as requestsGET } from "@/app/api/rdash/payment-requests/route";
 import { POST as bulkPOST } from "@/app/api/rdash/payment-entries/bulk/route";
+import { clearProjectsCache } from "@/lib/server/rdash-source/real";
 
 // DEV-only RDASH_AUTH_MODE=static_token. The token below is a throwaway test
 // value — never a real one.
@@ -60,6 +61,7 @@ describe("routes in static-token mode", () => {
   beforeEach(() => {
     Object.assign(process.env, DEV_ENV);
     delete process.env.RDASH_DEV_ALLOW_WRITES;
+    clearProjectsCache();
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     for (const m of ["log", "warn", "error", "info"] as const) vi.spyOn(console, m).mockImplementation(() => {});
@@ -89,7 +91,8 @@ describe("routes in static-token mode", () => {
     fetchMock.mockImplementation(async (url: string) => {
       const u = new URL(url);
       if (u.pathname === "/v2/vendor-payment-requests/config/") return ok({ count: 1, next: null, previous: null, results: [ITEM] });
-      if (u.pathname === "/v2/projects") return ok([{ id: ITEM.project_id, job_id: "J", name: "Tower", created_at: "", is_archived: false, is_deleted: false }]);
+      if (u.pathname === "/v2/projects")
+        return ok({ count: 1, next: null, previous: null, results: [{ id: ITEM.project_id, job_id: "J", name: "Tower", created_at: "", is_archived: false, is_deleted: false }] });
       return ok({ id: ITEM.payment_request_id, requested_by: { id: "u", name: "A" } });
     });
     const res = await requestsGET(req("/api/rdash/payment-requests"));

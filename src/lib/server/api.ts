@@ -346,8 +346,14 @@ export async function paginateRdash<T>(
     }
     const json = await res.json();
     const root = json?.data;
-    // TODO(verify): envelope is `{ data: [...] }` or `{ data: { data: [...] } }`
-    // (docs/api-notes.md → "List envelope"). Anything else throws — never [].
+    // DRF page (`{ count, next, previous, results }` — e.g. /v2/projects and
+    // the config, confirmed from real responses): hand the already-fetched
+    // first page to the DRF paginator (follow `next`, total = count, strict).
+    if (i === 0 && isDrfPage(root)) {
+      return drfFollow<T>(path, url, json, currentToken, opts);
+    }
+    // Legacy envelopes `{ data: [...] }` / `{ data: { data: [...] } }`
+    // (TODO(verify), docs/api-notes.md → #2). Anything else throws — never [].
     let page: T[];
     if (Array.isArray(root)) page = root;
     else if (root && Array.isArray(root.data)) page = root.data;
@@ -411,16 +417,42 @@ export async function paginateRdash<T>(
 // 401: refresh-once like apiFetch (never in dev static-token mode; never with
 // opts.noRefresh). 403 → RdashPermissionError.
 export async function paginateRdashDrf<T>(path: string, token: string, opts?: { noRefresh?: boolean }): Promise<T[]> {
-  const PAGE = 200;
-  const MAX_PAGES = 200;
   const base = requireEnv("RDASH_API_URL");
   const sep = path.includes("?") ? "&" : "?";
-  const first = new URL(`${base}${path}${sep}limit=${PAGE}&offset=0`);
+  return drfFollow<T>(path, `${base}${path}${sep}limit=${DRF_PAGE}&offset=0`, null, token, opts);
+}
+
+const DRF_PAGE = 200;
+
+/** A DRF page root: `{ count: number, next, results: [] }`. */
+function isDrfPage(root: unknown): boolean {
+  return (
+    !!root &&
+    typeof root === "object" &&
+    !Array.isArray(root) &&
+    Array.isArray((root as { results?: unknown }).results) &&
+    "count" in (root as object) &&
+    "next" in (root as object)
+  );
+}
+
+// DRF core. `prefetched` = the already-fetched JSON of `firstUrl` (when
+// paginateRdash detected a DRF page), so page 1 isn't requested twice.
+async function drfFollow<T>(
+  path: string,
+  firstUrl: string,
+  prefetched: unknown,
+  token: string,
+  opts?: { noRefresh?: boolean },
+): Promise<T[]> {
+  const MAX_PAGES = 200;
+  const first = new URL(firstUrl);
   const ctxHeaders = await getOutboundContextHeaders();
   let currentToken = token;
   let count: number | null = null;
   const out: T[] = [];
   let url: string | null = first.toString();
+  let pending: unknown = prefetched;
 
   const shapeError = (detail: Record<string, unknown>): never => {
     console.error("[paginateRdashDrf] unexpected response", { path, ...detail });
@@ -430,6 +462,44 @@ export async function paginateRdashDrf<T>(path: string, token: string, opts?: { 
   for (let i = 0; url; i++) {
     if (i >= MAX_PAGES) shapeError({ reason: "page cap reached", collected: out.length, count });
     const pageUrl: string = url;
+    let json: { success?: unknown; data?: unknown } | null;
+    if (pending !== null && pending !== undefined) {
+      json = pending as typeof json;
+      pending = null;
+    } else {
+      json = await fetchDrfPage(pageUrl);
+    }
+    if (!json || json.success === false) shapeError({ reason: "success=false or not JSON", page: i });
+    const root = (json as { data?: unknown }).data as { count?: unknown; results?: unknown; next?: unknown } | undefined;
+    const pageCount = root?.count as number;
+    const results = root?.results;
+    const next = root?.next;
+    if (!Number.isInteger(pageCount) || pageCount < 0) shapeError({ reason: "invalid count", page: i });
+    if (!Array.isArray(results)) shapeError({ reason: "results not an array", page: i, keys: root && typeof root === "object" ? Object.keys(root) : typeof root });
+    if (next !== null && typeof next !== "string") shapeError({ reason: "invalid next", page: i });
+    if (count === null) count = pageCount;
+    else if (pageCount !== count) shapeError({ reason: "count changed between pages", page: i, count, pageCount });
+    for (const item of results as T[]) out.push(item);
+    if (next) {
+      if ((results as T[]).length === 0) shapeError({ reason: "empty page with next", page: i });
+      let nextUrl: URL;
+      try {
+        nextUrl = new URL(next as string);
+      } catch {
+        return shapeError({ reason: "next is not a URL", page: i });
+      }
+      if (nextUrl.origin !== first.origin || nextUrl.pathname !== first.pathname) {
+        shapeError({ reason: "next points outside RDASH_API_URL/path", page: i, nextOrigin: nextUrl.origin });
+      }
+      url = nextUrl.toString();
+    } else {
+      url = null;
+    }
+  }
+  if (out.length !== count) shapeError({ reason: "total does not match count", collected: out.length, count });
+  return out;
+
+  async function fetchDrfPage(pageUrl: string): Promise<{ success?: unknown; data?: unknown } | null> {
     let res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
     if (res.status === 401) {
       failIfStaticToken401("paginateRdashDrf", path);
@@ -451,36 +521,8 @@ export async function paginateRdashDrf<T>(path: string, token: string, opts?: { 
       console.error("[paginateRdashDrf] failed:", path, res.status, body.slice(0, 300));
       throw new RdashUpstreamError(res.status);
     }
-    const json = await res.json().catch(() => null);
-    if (!json || json.success === false) shapeError({ reason: "success=false or not JSON", page: i });
-    const root = json.data;
-    const pageCount = root?.count;
-    const results = root?.results;
-    const next = root?.next;
-    if (!Number.isInteger(pageCount) || pageCount < 0) shapeError({ reason: "invalid count", page: i });
-    if (!Array.isArray(results)) shapeError({ reason: "results not an array", page: i, keys: root && typeof root === "object" ? Object.keys(root) : typeof root });
-    if (next !== null && typeof next !== "string") shapeError({ reason: "invalid next", page: i });
-    if (count === null) count = pageCount;
-    else if (pageCount !== count) shapeError({ reason: "count changed between pages", page: i, count, pageCount });
-    for (const item of results as T[]) out.push(item);
-    if (next) {
-      if ((results as T[]).length === 0) shapeError({ reason: "empty page with next", page: i });
-      let nextUrl: URL;
-      try {
-        nextUrl = new URL(next);
-      } catch {
-        return shapeError({ reason: "next is not a URL", page: i });
-      }
-      if (nextUrl.origin !== first.origin || nextUrl.pathname !== first.pathname) {
-        shapeError({ reason: "next points outside RDASH_API_URL/path", page: i, nextOrigin: nextUrl.origin });
-      }
-      url = nextUrl.toString();
-    } else {
-      url = null;
-    }
+    return res.json().catch(() => null);
   }
-  if (out.length !== count) shapeError({ reason: "total does not match count", collected: out.length, count });
-  return out;
 }
 
 // ============ Vendors (org-level) ============

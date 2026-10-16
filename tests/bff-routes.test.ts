@@ -6,6 +6,7 @@ import { GET as projectsGET } from "@/app/api/rdash/projects/route";
 import { GET as requestsGET } from "@/app/api/rdash/payment-requests/route";
 import { POST as bulkPOST } from "@/app/api/rdash/payment-entries/bulk/route";
 import { resetMockState } from "@/lib/server/rdash-source/mock";
+import { clearProjectsCache } from "@/lib/server/rdash-source/real";
 import detailsJson from "@/lib/server/rdash-source/mock-data/details.json";
 import { rdashPaise } from "@/lib/payments/money";
 
@@ -41,7 +42,8 @@ function rdashStub(url: string, init?: RequestInit): Response {
   const u = new URL(url);
   // DRF pagination (single page here; multi-page paging is tested in rdash-source.test.ts).
   if (u.pathname === CONFIG_PATH) return ok({ count: serverConfig.length, next: null, previous: null, results: serverConfig });
-  if (u.pathname === "/v2/projects") return ok([{ id: "PJ1", job_id: "J", name: "Tower One", created_at: "", is_archived: false, is_deleted: false }]);
+  if (u.pathname === "/v2/projects")
+    return ok({ count: 1, next: null, previous: null, results: [{ id: "PJ1", job_id: "J", name: "Tower One", created_at: "", is_archived: false, is_deleted: false }] });
   if (u.pathname === "/v2/projects/PJ1/vendor-payment-requests/PR2") return new Response("boom", { status: 500 });
   if (u.pathname.startsWith("/v2/projects/PJ1/vendor-payment-requests/")) {
     return ok({ ...detailsJson[0], id: u.pathname.split("/").pop() });
@@ -84,6 +86,7 @@ beforeEach(async () => {
   process.env.RDASH_DATA_SOURCE = "real";
   delete process.env.MOCK_FAIL_IDS;
   resetMockState();
+  clearProjectsCache();
   cookie = await makeSessionCookie({ vendorId: "33" });
   serverConfig = SERVER_CONFIG;
   bulkResponse = () => ok({ count: 0, created: [], failed: [] });
