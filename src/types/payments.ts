@@ -31,7 +31,7 @@ export interface AllocationRow {
 
   // ── UI state ──
   // Payment Done: raw input text ("" = nothing entered); validated by
-  // lib/payments/validation.ts (number, ≤ payment_due, max 2 decimals).
+  // lib/payments/validation.ts (≤ 20 integer digits, ≤ 4 decimals, ≤ payment_due).
   amount: string;
   // Row Remarks: header Remark copied in until the user edits the row.
   remark: string;
@@ -57,8 +57,9 @@ export interface BulkSubmitResult {
   count: number;
   created: BulkPaymentEntryCreated[];
   failed: BulkPaymentEntryFailed[];
-  recordedAmount: number;
-  notRecordedAmount: number;
+  /** Exact decimal strings (e.g. "30000", "1200.5") — never JS numbers. */
+  recordedAmount: string;
+  notRecordedAmount: string;
 }
 
 // POST /api/rdash/payment-entries/bulk body. Only these fields are read; any

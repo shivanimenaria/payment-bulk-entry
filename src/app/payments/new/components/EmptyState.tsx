@@ -5,11 +5,11 @@ import { rdButtonOutline } from "@/components/rd/styles";
 
 // rDash NoPaymentEntry: centred column, gap 20, #d0d5dd; ExpenseIcon 90×90 +
 // 24px semibold text.
-export function EmptyState() {
+export function EmptyState({ message = "No payable requests to show" }: { message?: string }) {
   return (
     <div className="flex min-h-[420px] flex-col items-center justify-center gap-5 text-rd-disabled">
       <ExpenseIcon size={90} />
-      <div className="text-[24px] font-semibold">No payable requests to show</div>
+      <div className="text-[24px] font-semibold">{message}</div>
     </div>
   );
 }

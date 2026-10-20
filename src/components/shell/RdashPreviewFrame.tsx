@@ -107,14 +107,9 @@ export function RdashPreviewFrame({ children }: { children: React.ReactNode }) {
             </div>
           </header>
           {/* Vendor tabs + currency */}
-          <RdStepper
-            items={VENDOR_TABS.map((t) => ({ key: t, label: t, active: t === "Vendor Payments" }))}
-            right={
-              <span className="flex items-center gap-1 text-[14px] text-rd-black">
-                Currency : INR <ChevronDown className="h-3 w-3 text-rd-placeholder" />
-              </span>
-            }
-          />
+          {/* rDash's own "Currency : …" selector is omitted here: PBE has its
+              own currency filter (top-right of the page). */}
+          <RdStepper items={VENDOR_TABS.map((t) => ({ key: t, label: t, active: t === "Vendor Payments" }))} />
           {/* Vendor Payments sub-tabs, Bulk Payment Entry active */}
           <div className="px-5 pt-5">
             <div className="overflow-hidden rounded-rd border border-rd-border bg-white">

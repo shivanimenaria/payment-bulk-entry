@@ -4,7 +4,7 @@
 // already answers 502 for that case instead of a result).
 import type { BulkPaymentEntryInput } from "@/types/rdash";
 import type { BulkSubmitRequest, BulkSubmitResult } from "@/types/payments";
-import { paiseToInput, toPaise } from "./money";
+import { unitsToDecimalString, userUnits } from "./money";
 
 /** A failed id that isn't among the previous entries — the result doesn't
  *  belong to this submission; refuse rather than guess. */
@@ -31,17 +31,17 @@ export function buildRetryEntries(result: BulkSubmitResult, previous: BulkPaymen
 }
 
 /** Route body for Retry failed: only failed rows; Amount Paid becomes the
- *  not-recorded amount (sum of the retried rows, in paise). */
+ *  not-recorded amount (exact sum of the retried rows). */
 export function buildRetryRequest(result: BulkSubmitResult, previous: BulkSubmitRequest): BulkSubmitRequest {
   const ids = failedIds(result, new Set(previous.rows.map((r) => r.payment_request_id)));
   const rows = previous.rows.filter((r) => ids.has(r.payment_request_id));
-  let paise = 0;
+  let total = BigInt(0);
   for (const r of rows) {
-    const p = toPaise(r.amount);
-    if (p === null) throw new Error(`Invalid amount in previous submission for ${r.payment_request_id}`);
-    paise += p;
+    const u = userUnits(r.amount);
+    if (u === null) throw new Error(`Invalid amount in previous submission for ${r.payment_request_id}`);
+    total += u;
   }
-  return { header: { ...previous.header, amountPaid: paiseToInput(paise) }, rows };
+  return { header: { ...previous.header, amountPaid: unitsToDecimalString(total) }, rows };
 }
 
 /** Drop one id from the retryable failures (after the user removed that row).

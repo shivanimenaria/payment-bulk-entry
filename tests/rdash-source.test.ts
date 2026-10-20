@@ -13,7 +13,7 @@ import projectsJson from "@/lib/server/rdash-source/mock-data/projects.json";
 import configJson from "@/lib/server/rdash-source/mock-data/config.mock-vendor.json";
 import detailsJson from "@/lib/server/rdash-source/mock-data/details.json";
 import type { BulkPaymentEntryInput, VendorPaymentRequestConfigItem } from "@/types/rdash";
-import { rdashPaise } from "@/lib/payments/money";
+import { rdashUnits } from "@/lib/payments/money";
 import realConfigPage from "./fixtures/real-config-page.json";
 
 const API = "https://rdash-api.example.com";
@@ -73,7 +73,7 @@ describe("mock fixtures: strict Swagger shapes", () => {
     for (const c of configJson.results) {
       expect(Object.keys(c).sort()).toEqual(CONFIG_KEYS);
       for (const a of [c.request_amount, c.paid_amount, c.payment_due]) expect(typeof a).toBe("string");
-      expect(rdashPaise(c.request_amount)).toBe(rdashPaise(c.paid_amount)! + rdashPaise(c.payment_due)!);
+      expect(rdashUnits(c.request_amount)).toBe(rdashUnits(c.paid_amount)! + rdashUnits(c.payment_due)!);
       expect(Object.keys(c.currency).sort()).toEqual(["code", "id", "locale", "name", "symbol"]);
     }
     // Only real rDash PAYMENT_REQUEST_STATUS values.
@@ -88,7 +88,7 @@ describe("mock fixtures: strict Swagger shapes", () => {
       ["mock-pr-104", "submitted", "45000.0000"],
       ["mock-pr-105", "approved", "35000.0000"],
     ]);
-    expect(payable.reduce((a, c) => a + rdashPaise(c.payment_due)!, 0)).toBe(20000000);
+    expect(payable.reduce((a, c) => a + rdashUnits(c.payment_due)!, BigInt(0))).toBe(BigInt(2000000000));
     expect(configJson.results.filter((c) => !isPayable(c)).map((c) => [c.status, c.payment_due])).toEqual([
       ["approved", "0"],
       ["rejected", "20000.0000"],
@@ -106,7 +106,7 @@ describe("mock fixtures: strict Swagger shapes", () => {
       expect(d.request_status).toBe(c.status);
       expect(d.payment_due).toBe(c.payment_due);
       expect(d.total_request_amount).toBe(c.request_amount);
-      expect(rdashPaise(d.request_amount_without_tax)! + rdashPaise(d.tax_amount)!).toBe(rdashPaise(d.total_request_amount));
+      expect(rdashUnits(d.request_amount_without_tax)! + rdashUnits(d.tax_amount)!).toBe(rdashUnits(d.total_request_amount));
       // requested_by = { id, name } | null (corrected Swagger)
       expect(d.requested_by === null || Object.keys(d.requested_by).sort().join() === "id,name").toBe(true);
       for (const a of d.attachments) expect(Object.keys(a).sort()).toEqual(["file", "id", "name", "uploaded_at", "uploaded_by"]);
@@ -155,7 +155,7 @@ describe("mock source", () => {
     const rows = await requestsRouteCopy.createMockSource().listPaymentRequestConfig("mock-vendor");
     const payable = rows.filter(isPayable);
     expect(payable.map((r) => r.payment_request_id)).toEqual(["mock-pr-102", "mock-pr-104", "mock-pr-105"]);
-    expect(payable.reduce((t, r) => t + rdashPaise(r.payment_due)!, 0)).toBe(13000000);
+    expect(payable.reduce((t, r) => t + rdashUnits(r.payment_due)!, BigInt(0))).toBe(BigInt(1300000000));
 
     // Entry ids continue across instances (same store, not two counters).
     const next = await requestsRouteCopy.createMockSource().createBulkPaymentEntries([entry("mock-pr-102", 1)]);
@@ -387,8 +387,8 @@ describe("real source", () => {
       expect(String(fetchMock.mock.calls[1][0])).toBe(new URL(page1.data.next as string).toString());
       const r = rows[0];
       expect(r).toMatchObject({ payment_request_id: "6MWy2q21ZJxj7aJY", project_id: "1o9M5v3NGWPbx2Q4", status: "approved" });
-      expect(rdashPaise(r.payment_due)).toBe(2950000); // "29500.0000" → exact paise
-      expect(rdashPaise(r.paid_amount)).toBe(0);
+      expect(rdashUnits(r.payment_due)).toBe(BigInt(295000000)); // "29500.0000" → exact units (0.0001)
+      expect(rdashUnits(r.paid_amount)).toBe(BigInt(0));
       expect(r.currency).toEqual({ id: "9ng3XGvlNqK8oJ4V", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" });
       expect(isPayable(r)).toBe(true);
     } finally {

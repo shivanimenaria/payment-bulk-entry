@@ -89,7 +89,7 @@ export function AllocationTable({
               <th
                 key={c.label}
                 scope="col"
-                style={i === 0 ? { width: SNO_WIDTH + 20 } : undefined}
+                style={i === 0 ? { width: SNO_WIDTH + 20 } : c.right ? { width: 160 } : undefined}
                 className={cn(
                   "whitespace-nowrap px-[5px] pb-4 pt-[17px] align-top text-[12px] font-semibold text-rd-black",
                   i === 0 && "pl-5",

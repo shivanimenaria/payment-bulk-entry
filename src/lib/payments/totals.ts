@@ -1,21 +1,21 @@
-// Summary-card totals. Pure; integer paise throughout.
+// Summary-card totals. Pure; exact BigInt units (0.0001) throughout.
 import type { AllocationRow } from "@/types/payments";
-import { parseRdashAmount, rowAmountPaise, toPaise } from "./money";
-import { rowAmountIssue } from "./allocation";
+import { parseRdashAmount, rowAmountUnits, userUnits, type Units } from "./money";
+import { AMOUNT_INVALID_MESSAGE, rowAmountIssue } from "./allocation";
 
 export interface Totals {
-  /** Sum of payment_due over the processable rows (see unprocessableCount);
-   *  null only if that sum itself exceeds safe integer paise (renders "—"). */
-  totalDuePaise: number | null;
-  /** Rows excluded from totals because an amount can't be processed
-   *  (too large / invalid — lib/payments/allocation.ts rowAmountIssue). */
+  /** Sum of payment_due over the rows (exact, any size). Rows with an invalid
+   *  rDash amount are excluded and counted in unprocessableCount; rows whose
+   *  due exceeds the bulk API limit ARE included. */
+  totalDueUnits: Units;
+  /** Rows excluded from totals because an rDash amount is invalid. */
   unprocessableCount: number;
-  /** Header Amount Paid; null while the input isn't valid money. */
-  amountPaidPaise: number | null;
+  /** Header Amount Paid; null while the input isn't a valid amount. */
+  amountPaidUnits: Units | null;
   /** Sum of valid row amounts (malformed inputs are excluded and flagged). */
-  allocatedPaise: number;
+  allocatedUnits: Units;
   /** amountPaid − allocated; null while Amount Paid isn't valid. */
-  excessPaise: number | null;
+  excessUnits: Units | null;
   /** Rows with a valid amount > 0. */
   selectedCount: number;
   /** At least one row amount is malformed (so allocated is incomplete). */
@@ -23,36 +23,34 @@ export interface Totals {
 }
 
 export function computeTotals(amountPaid: unknown, rows: AllocationRow[]): Totals {
-  let totalDuePaise: number | null = 0;
+  const zero = BigInt(0);
+  let totalDueUnits = zero;
   let unprocessableCount = 0;
-  let allocatedPaise = 0;
+  let allocatedUnits = zero;
   let selectedCount = 0;
   let hasInvalidAmount = false;
   for (const row of rows) {
     const due = parseRdashAmount(row.config.payment_due);
-    if (!due.ok || rowAmountIssue(row)) {
+    if (!due.ok || rowAmountIssue(row) === AMOUNT_INVALID_MESSAGE) {
       unprocessableCount++;
-      continue; // can't take a payment either (isAmountEditable)
+      continue;
     }
-    if (totalDuePaise !== null) {
-      const sum: number = totalDuePaise + due.paise;
-      totalDuePaise = Number.isSafeInteger(sum) ? sum : null;
-    }
-    const amount = rowAmountPaise(row.amount);
+    totalDueUnits += due.units;
+    const amount = rowAmountUnits(row.amount);
     if (amount === null) {
       hasInvalidAmount = true;
-    } else if (amount > 0) {
-      allocatedPaise += amount;
+    } else if (amount > zero) {
+      allocatedUnits += amount;
       selectedCount++;
     }
   }
-  const amountPaidPaise = toPaise(amountPaid);
+  const amountPaidUnits = userUnits(amountPaid);
   return {
-    totalDuePaise,
+    totalDueUnits,
     unprocessableCount,
-    amountPaidPaise,
-    allocatedPaise,
-    excessPaise: amountPaidPaise === null ? null : amountPaidPaise - allocatedPaise,
+    amountPaidUnits,
+    allocatedUnits,
+    excessUnits: amountPaidUnits === null ? null : amountPaidUnits - allocatedUnits,
     selectedCount,
     hasInvalidAmount,
   };

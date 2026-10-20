@@ -2,8 +2,8 @@
 
 import { CheckCircle2, AlertTriangle, Loader2, XCircle } from "lucide-react";
 import type { BulkSubmitResult } from "@/types/payments";
-import { fromPaise } from "@/lib/payments/money";
-import { formatMoney, textOrDash } from "@/lib/format";
+import { decimalUnits, type Units } from "@/lib/payments/money";
+import { formatMoneyUnits, textOrDash } from "@/lib/format";
 import { rdButtonPrimary, rdCard, rdCountLabel } from "@/components/rd/styles";
 import { cn } from "@/lib/utils";
 
@@ -17,7 +17,7 @@ export type SubmitOutcome =
   | {
       kind: "result";
       result: BulkSubmitResult;
-      amounts: Map<string, number>;
+      amounts: Map<string, Units>;
       labels: Map<string, RowLabel>;
       /** Rows' currency symbol at submit time (null = none / mixed). */
       symbol: string | null;
@@ -35,7 +35,7 @@ function Lines({
 }: {
   symbol: string | null;
   items: { payment_request_id: string; error?: string }[];
-  amounts: Map<string, number>;
+  amounts: Map<string, Units>;
   labels: Map<string, RowLabel>;
   removed?: Set<string>;
   tone: "ok" | "fail";
@@ -57,7 +57,7 @@ function Lines({
             <tr key={it.payment_request_id} className="border-t border-rd-divider">
               <td className="py-1.5 pr-4 font-semibold text-rd-text">{textOrDash(labels.get(it.payment_request_id)?.requestNumber)}</td>
               <td className="py-1.5 pr-4 text-rd-text">{textOrDash(labels.get(it.payment_request_id)?.projectName)}</td>
-              <td className="py-1.5 pr-4 text-right tabular-nums text-rd-text">{formatMoney(p === undefined ? null : fromPaise(p), symbol)}</td>
+              <td className="py-1.5 pr-4 text-right tabular-nums text-rd-text">{formatMoneyUnits(p ?? null, symbol)}</td>
               {tone === "fail" ? (
                 <td className="py-1.5 text-rd-red">
                   {it.error || "Not recorded"}
@@ -123,7 +123,7 @@ export function SubmitResult({
       <section role="status" aria-label="Submit result" className={cn(rdCard, "flex items-center gap-2 p-[15px] text-[14px] text-rd-text")}>
         <CheckCircle2 className="h-4 w-4 shrink-0 text-rd-approved" />
         <p className="font-semibold">
-          {result.created.length} {result.created.length === 1 ? "payment" : "payments"} recorded · {formatMoney(result.recordedAmount, currencySymbol)}
+          {result.created.length} {result.created.length === 1 ? "payment" : "payments"} recorded · {formatMoneyUnits(decimalUnits(result.recordedAmount), currencySymbol)}
         </p>
       </section>
     );
@@ -133,7 +133,7 @@ export function SubmitResult({
       <div className="flex items-center justify-between gap-4">
         <p className="flex items-center gap-2 text-sm font-semibold text-rd-text">
           <AlertTriangle className="h-4 w-4 text-rd-pending" />
-          {formatMoney(result.recordedAmount, currencySymbol)} recorded, {formatMoney(result.notRecordedAmount, currencySymbol)} NOT recorded
+          {formatMoneyUnits(decimalUnits(result.recordedAmount), currencySymbol)} recorded, {formatMoneyUnits(decimalUnits(result.notRecordedAmount), currencySymbol)} NOT recorded
         </p>
         <button
           type="button"

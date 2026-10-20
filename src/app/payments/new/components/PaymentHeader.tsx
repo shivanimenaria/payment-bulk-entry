@@ -4,6 +4,7 @@ import type { PaymentHeader as PaymentHeaderValue } from "@/types/payments";
 import type { PaymentMode } from "@/types/rdash";
 import { PAYMENT_MODES } from "@/lib/payments/validation";
 import { cn } from "@/lib/utils";
+import { isAllowedAmountInput } from "@/lib/payments/money";
 import { rdCard, rdInputCls, rdLabel } from "@/components/rd/styles";
 import { RdDateInput, RdSelect } from "@/components/rd/FilterInputs";
 
@@ -64,7 +65,10 @@ export function PaymentHeader({
             placeholder="0.00"
             className={rdInputCls(!!errors.amountPaid, "text-right tabular-nums")}
             value={value.amountPaid}
-            onChange={(e) => onChange("amountPaid", e.target.value)}
+            // Block typing beyond 20 integer digits / 4 decimals (bulk API limit).
+            onChange={(e) => {
+              if (isAllowedAmountInput(e.target.value)) onChange("amountPaid", e.target.value);
+            }}
           />
         </Field>
         <Field label="Payment date" required htmlFor="paymentDate" error={errors.paymentDate}>

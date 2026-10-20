@@ -2,14 +2,18 @@
 
 import type { AllocationRow as Row } from "@/types/payments";
 import { isAmountEditable, rowAmountIssue } from "@/lib/payments/allocation";
-import { DASH, formatDate, formatRdashAmount, textOrDash } from "@/lib/format";
+import { isAllowedAmountInput } from "@/lib/payments/money";
+import { DASH, formatDate, formatRdashAmount, formatRequestType, textOrDash } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { rdInputCls, rdStatusClass, rdTextLinkSm } from "@/components/rd/styles";
 
 // rDash row: font-size-14, p-20 (20px vertical; 10px column gap), border-b
 // #c7c8c9, black text; amounts right-aligned.
 const cell = "whitespace-nowrap px-[5px] py-5 align-top text-[14px] leading-[22px] text-rd-black";
+// Amount cells: fixed width; long values (up to 29 digits) are cut with an
+// ellipsis and shown in full in the title tooltip.
 const num = "text-right tabular-nums";
+const amountCell = "w-[150px] min-w-[150px] max-w-[150px] truncate";
 
 function Pending() {
   return <span className="italic text-rd-placeholder">Details pending</span>;
@@ -75,12 +79,16 @@ export function AllocationRow({
           </span>
         )}
       </td>
-      <td className={cell}>{detail(textOrDash(d?.request_type))}</td>
+      <td className={cell}>{detail(formatRequestType(d?.request_type))}</td>
       <td className={cell}>{detail(formatDate(d?.due_date))}</td>
       <td className={cell}>{detail(textOrDash(d?.requested_by?.name))}</td>
       <td className={cn(cell, rdStatusClass(row.config.status))}>{titleCase(row.config.status)}</td>
-      <td className={cn(cell, num)}>{formatRdashAmount(row.config.request_amount)}</td>
-      <td className={cn(cell, num)}>{formatRdashAmount(row.config.payment_due)}</td>
+      <td className={cn(cell, num, amountCell)} title={formatRdashAmount(row.config.request_amount)}>
+        {formatRdashAmount(row.config.request_amount)}
+      </td>
+      <td className={cn(cell, num, amountCell)} title={formatRdashAmount(row.config.payment_due)}>
+        {formatRdashAmount(row.config.payment_due)}
+      </td>
       <td className={cn(cell, "min-w-[190px]")}>
         <div className="flex items-center gap-2">
           <input
@@ -90,8 +98,12 @@ export function AllocationRow({
             placeholder="0.00"
             disabled={!editable}
             className={rdInputCls(!!amountError, "w-28 text-right tabular-nums")}
+            title={row.amount || undefined}
             value={row.amount}
-            onChange={(e) => onAmount(e.target.value)}
+            // Block typing beyond 20 integer digits / 4 decimals (bulk API limit).
+            onChange={(e) => {
+              if (isAllowedAmountInput(e.target.value)) onAmount(e.target.value);
+            }}
           />
           <button type="button" disabled={!editable} onClick={onPayInFull} className={rdTextLinkSm}>
             Pay in full

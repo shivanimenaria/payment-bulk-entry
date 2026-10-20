@@ -8,7 +8,7 @@ import { POST as bulkPOST } from "@/app/api/rdash/payment-entries/bulk/route";
 import { resetMockState } from "@/lib/server/rdash-source/mock";
 import { clearProjectsCache } from "@/lib/server/rdash-source/real";
 import detailsJson from "@/lib/server/rdash-source/mock-data/details.json";
-import { rdashPaise } from "@/lib/payments/money";
+import { rdashUnits } from "@/lib/payments/money";
 
 const APP = "https://pbe.example.com";
 const API = "https://rdash-api.example.com";
@@ -168,8 +168,8 @@ describe("POST /api/rdash/payment-entries/bulk (real)", () => {
       count: 2,
       created: [{ id: "E1", payment_request_id: "PR1" }, { id: "E2", payment_request_id: "PR2" }],
       failed: [],
-      recordedAmount: 1500,
-      notRecordedAmount: 0,
+      recordedAmount: "1500",
+      notRecordedAmount: "0",
     });
   });
 
@@ -213,7 +213,9 @@ describe("POST /api/rdash/payment-entries/bulk (real)", () => {
 
   it.each([
     ["zero-due row", { payment_request_id: "PR0", amount: "1", remark: null }, "payment_request_id"],
-    ["3 decimals", { payment_request_id: "PR1", amount: "1.005", remark: null }, "amount"],
+    ["5 decimals", { payment_request_id: "PR1", amount: "1.00005", remark: null }, "amount"],
+    ["21 integer digits", { payment_request_id: "PR1", amount: "100000000000000000000", remark: null }, "amount"],
+    ["exponent", { payment_request_id: "PR1", amount: "1e5", remark: null }, "amount"],
     ["zero amount", { payment_request_id: "PR1", amount: "0", remark: null }, "amount"],
     ["negative", { payment_request_id: "PR1", amount: -5, remark: null }, "amount"],
   ])("%s → 400", async (_l, row, field) => {
@@ -251,7 +253,45 @@ describe("POST /api/rdash/payment-entries/bulk (real)", () => {
       ],
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ recordedAmount: 1000, notRecordedAmount: 200.5, count: 1 });
+    expect(await res.json()).toMatchObject({ recordedAmount: "1000", notRecordedAmount: "200.5", count: 1 });
+  });
+
+  it("16+ significant digits with BULK_AMOUNT_AS_STRING=false → 400 before rDash is called (never rounded)", async () => {
+    serverConfig = [{ ...SERVER_CONFIG[0], request_amount: "9999999999999999999.0000", payment_due: "9999999999999999999.0000" }];
+    const res = await post({
+      header: header("1234567890123456"),
+      rows: [{ payment_request_id: "PR1", amount: "1234567890123456", remark: null }],
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).fieldErrors.rows[0].amount).toBe(
+      "Amount too large to submit exactly (rDash API takes numbers) — max 15 significant digits until rDash confirms string amounts",
+    );
+    expect(bulkCalls()).toHaveLength(0);
+  });
+
+  it("BULK_AMOUNT_AS_STRING=true → the exact decimal string is sent", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/payments/build-payload", async (orig) => ({ ...(await orig<object>()), BULK_AMOUNT_AS_STRING: true }));
+    try {
+      const { POST } = await import("@/app/api/rdash/payment-entries/bulk/route");
+      const max = "99999999999999999999.9999";
+      serverConfig = [{ ...SERVER_CONFIG[0], request_amount: "99999999999999999999.9999", payment_due: "99999999999999999999.9999" }];
+      bulkResponse = () => ok({ count: 1, created: [{ id: "E1", payment_request_id: "PR1" }], failed: [] });
+      const res = await POST(
+        new NextRequest(`${APP}/api/rdash/payment-entries/bulk`, {
+          method: "POST",
+          headers: { cookie: `pbe-auth=${cookie}` },
+          body: JSON.stringify({ header: header(max), rows: [{ payment_request_id: "PR1", amount: max, remark: null }] }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      const raw = String(bulkCalls()[0][1].body);
+      expect(raw).toContain(`"amount":"${max}"`);
+      expect((await res.json()).recordedAmount).toBe(max);
+    } finally {
+      vi.doUnmock("@/lib/payments/build-payload");
+      vi.resetModules();
+    }
   });
 
   it("bulk output that doesn't account for every entry → 502 (never reported as not recorded)", async () => {
@@ -311,7 +351,7 @@ describe("payable-status filter (lib/payments/payable.ts)", () => {
     expect(detailIds.sort()).toEqual(["P-APPROVED", "P-PENDING", "P-SUBMITTED"]);
   });
 
-  it("a payable row whose amount is too large is returned (with the page intact), not dropped", async () => {
+  it("a payable row whose due exceeds the submit limit is returned (with the page intact), not dropped", async () => {
     const huge = "2000000000000000000000000000.0000";
     serverConfig = [
       ...MIXED.slice(0, 1),
@@ -347,6 +387,21 @@ describe("payable-status filter (lib/payments/payable.ts)", () => {
       ],
     });
     expect(res.status).toBe(400);
+    expect(bulkCalls()).toHaveLength(0);
+  });
+
+  it("bulk: rows in different currencies (fresh config) → 400, bulk API not called", async () => {
+    const USD = { id: "u", name: "US Dollar", symbol: "$", code: "USD", locale: "en-US" };
+    serverConfig = [item("P-INR", "approved", 10), { ...item("P-USD", "approved", 20), currency: USD }];
+    const res = await post({
+      header: header("30"),
+      rows: [
+        { payment_request_id: "P-INR", amount: "10", remark: null },
+        { payment_request_id: "P-USD", amount: "20", remark: null },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).fieldErrors.form).toContain("All payments must be in the same currency");
     expect(bulkCalls()).toHaveLength(0);
   });
 
@@ -404,7 +459,7 @@ describe("mock mode", () => {
   it("payment-requests → 5 rows (due-0 request hidden), total due 200000", async () => {
     const { rows } = await (await get(requestsGET, "/api/rdash/payment-requests", false)).json();
     expect(rows).toHaveLength(5);
-    expect(rows.reduce((s: number, r: { config: { payment_due: string } }) => s + rdashPaise(r.config.payment_due)!, 0)).toBe(20000000);
+    expect(rows.reduce((s: bigint, r: { config: { payment_due: string } }) => s + rdashUnits(r.config.payment_due)!, BigInt(0))).toBe(BigInt(2000000000));
     expect(rows.some((r: { config: { payment_request_id: string } }) => r.config.payment_request_id === "mock-pr-106")).toBe(false);
   });
 
@@ -422,7 +477,7 @@ describe("mock mode", () => {
         }),
       }),
     );
-    expect(await res.json()).toMatchObject({ count: 1, recordedAmount: 30000, notRecordedAmount: 40000 });
+    expect(await res.json()).toMatchObject({ count: 1, recordedAmount: "30000", notRecordedAmount: "40000" });
     const { rows } = await (await get(requestsGET, "/api/rdash/payment-requests", false)).json();
     expect(rows.map((r: { config: { payment_request_id: string } }) => r.config.payment_request_id)).not.toContain("mock-pr-101");
   });

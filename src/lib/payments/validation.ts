@@ -2,27 +2,30 @@
 // server-only. The SAME helpers back both entry points:
 //   - validateAllocation(header, rows)   → client form (AllocationRow[])
 //   - validateSubmission(body, config)   → bulk route (fresh server config)
-// Shared rules live once: parseMoney/toPaise, validateHeader, checkRowAmount,
-// the excess check and the message strings.
+// Shared rules live once: userUnits / parseRdashAmount (money.ts),
+// validateHeader, checkRowAmount, the excess check and the message strings.
 //
-// Money is compared in integer paise so 0.1 + 0.2 style float drift can never
-// let an over-payment through.
+// Money is exact BigInt units (0.0001) — no float drift can ever let an
+// over-payment through. Entered / submitted amounts are capped at the POST
+// bulk limit 99999999999999999999.9999 (20 digits, 4 decimals).
 import type { PaymentMode, VendorPaymentRequestConfigItem } from "@/types/rdash";
 import type { AllocationRow, PaymentHeader } from "@/types/payments";
 import { computeTotals } from "./totals";
-import { toPaise, rowAmountPaise, parseRdashAmount, rdashPaise } from "./money";
-import { AMOUNT_INVALID_MESSAGE, AMOUNT_TOO_LARGE_MESSAGE, rowAmountIssue } from "./allocation";
+import { SUBMIT_LIMIT_MESSAGE, parseRdashAmount, rdashUnits, rowAmountUnits, userUnits, type Units } from "./money";
+import { AMOUNT_INVALID_MESSAGE, DUE_OVER_LIMIT_MESSAGE, rowAmountIssue } from "./allocation";
+import { AMOUNT_NOT_EXACT_MESSAGE, bulkAmountValue } from "./build-payload";
 import { isPayableStatus } from "./payable";
+import { distinctCurrencyCodes } from "./currency";
 
-// Money helpers live in money.ts (shared with totals.ts); re-exported so
-// existing imports from "validation" keep working.
-export { toPaise, fromPaise, paiseToInput, rowAmountPaise } from "./money";
 
 export const PAYMENT_MODES: readonly PaymentMode[] = ["bank_transfer", "cheque", "cash", "upi"];
 
 export const MESSAGES = {
-  amountPositive: "Enter an amount greater than 0 with at most 2 decimals",
-  amountFormat: "Enter an amount with at most 2 decimals",
+  amountPositive: "Enter an amount greater than 0",
+  /** Any entered/submitted amount that isn't a plain decimal within the
+   *  POST bulk limit (21+ digits, 5+ decimals, negative, exponent, text). */
+  amountLimit: SUBMIT_LIMIT_MESSAGE,
+  amountNotExact: AMOUNT_NOT_EXACT_MESSAGE,
   amountOverDue: "Amount is more than the payment due",
   paymentDate: "Enter a valid payment date",
   paymentMode: "Select a payment mode",
@@ -33,8 +36,9 @@ export const MESSAGES = {
   unknownRequest: "Unknown payment request for this vendor",
   nothingDue: "Nothing is due on this payment request",
   notPayableStatus: "This payment request can't be paid in its current status",
-  amountTooLarge: AMOUNT_TOO_LARGE_MESSAGE,
   amountInvalid: AMOUNT_INVALID_MESSAGE,
+  dueOverLimit: DUE_OVER_LIMIT_MESSAGE,
+  mixedCurrency: "All payments must be in the same currency",
   detailsUnavailable: "Details pending — this request can't be paid yet",
   detailsError: "Details could not be loaded — this request can't be paid",
   headerRequired: "Header is required",
@@ -73,12 +77,12 @@ export interface FieldErrors {
 }
 
 export interface ValidatedSubmission {
-  amountPaidPaise: number;
+  amountPaidUnits: Units;
   paymentDate: string;
   paymentMode: PaymentMode;
   reference: string | null;
   /** Only rows with an amount > 0, in input order. */
-  rows: { payment_request_id: string; amountPaise: number; remark: string | null }[];
+  rows: { payment_request_id: string; amountUnits: Units; remark: string | null }[];
 }
 
 export type ValidationResult =
@@ -97,18 +101,19 @@ const emptyErrors = (): FieldErrors => ({ form: [], header: {}, rows: {} });
 // ── Shared rules ─────────────────────────────────────────────
 
 export interface ValidatedHeader {
-  amountPaidPaise: number;
+  amountPaidUnits: Units;
   paymentDate: string;
   paymentMode: PaymentMode;
   reference: string | null;
 }
 
-/** Header: amountPaid > 0 (≤ 2 decimals), paymentDate, paymentMode required;
- *  reference / remark optional text. */
+/** Header: amountPaid > 0 within the submit limit (≤ 20 digits, ≤ 4
+ *  decimals), paymentDate, paymentMode required; reference / remark optional. */
 export function validateHeader(h: Partial<HeaderInput>): { errors: Record<string, string>; value: ValidatedHeader | null } {
   const errors: Record<string, string> = {};
-  const amountPaidPaise = toPaise(h.amountPaid);
-  if (amountPaidPaise === null || amountPaidPaise <= 0) errors.amountPaid = MESSAGES.amountPositive;
+  const amountPaidUnits = userUnits(h.amountPaid);
+  if (amountPaidUnits === null) errors.amountPaid = MESSAGES.amountLimit;
+  else if (amountPaidUnits <= BigInt(0)) errors.amountPaid = MESSAGES.amountPositive;
   if (!isValidDate(h.paymentDate)) errors.paymentDate = MESSAGES.paymentDate;
   if (typeof h.paymentMode !== "string" || !PAYMENT_MODES.includes(h.paymentMode as PaymentMode)) {
     errors.paymentMode = MESSAGES.paymentMode;
@@ -120,7 +125,7 @@ export function validateHeader(h: Partial<HeaderInput>): { errors: Record<string
   return {
     errors,
     value: {
-      amountPaidPaise: amountPaidPaise as number,
+      amountPaidUnits: amountPaidUnits as Units,
       paymentDate: h.paymentDate as string,
       paymentMode: h.paymentMode as PaymentMode,
       reference: reference.value,
@@ -128,22 +133,27 @@ export function validateHeader(h: Partial<HeaderInput>): { errors: Record<string
   };
 }
 
-/** Amount vs. due. `amountPaise` null = malformed. Zero is allowed only when
- *  `allowZero` (client: an empty/0 row is simply not selected). */
+/** Amount vs. due (exact units). `amount` null = not a valid amount within
+ *  the submit limit. Zero is allowed only when `allowZero` (client: an
+ *  empty/0 row is simply not selected). An amount that can't be sent to the
+ *  bulk API exactly (BULK_AMOUNT_AS_STRING=false and > 15 significant
+ *  digits) is rejected — never rounded. */
 export function checkRowAmount(
-  amountPaise: number | null,
-  duePaise: number | null,
-  opts: { allowZero: boolean },
+  amount: Units | null,
+  due: Units | null,
+  opts: { allowZero: boolean; bulkAmountAsString?: boolean },
 ): string | null {
-  if (amountPaise === null) return opts.allowZero ? MESSAGES.amountFormat : MESSAGES.amountPositive;
-  if (amountPaise === 0) return opts.allowZero ? null : MESSAGES.amountPositive;
-  if (duePaise !== null && duePaise > 0 && amountPaise > duePaise) return MESSAGES.amountOverDue;
+  const zero = BigInt(0);
+  if (amount === null) return MESSAGES.amountLimit;
+  if (amount === zero) return opts.allowZero ? null : MESSAGES.amountPositive;
+  if (due !== null && due > zero && amount > due) return MESSAGES.amountOverDue;
+  if (bulkAmountValue(amount, opts.bulkAmountAsString) === null) return MESSAGES.amountNotExact;
   return null;
 }
 
 /** Excess = Amount Paid − Allocated must be exactly 0. */
-export function checkExcess(amountPaidPaise: number, allocatedPaise: number): string | null {
-  return amountPaidPaise - allocatedPaise === 0 ? null : MESSAGES.excess;
+export function checkExcess(amountPaid: Units, allocated: Units): string | null {
+  return amountPaid - allocated === BigInt(0) ? null : MESSAGES.excess;
 }
 
 const HEADER_LABELS: Record<string, string> = {
@@ -173,39 +183,43 @@ function finish(errors: FieldErrors, summary: string[], value: ValidatedSubmissi
 
 /**
  * Validate the form before submit. Rows keyed by their index in `rows`.
- *  - Row amount ≥ 0 ("" = 0), ≤ 2 decimals, ≤ payment_due.
+ *  - Row amount ≥ 0 ("" = 0), ≤ 20 integer digits, ≤ 4 decimals, ≤ payment_due.
  *  - A row with detailsUnavailable or detailsError cannot have an amount > 0.
  *  - At least one row with amount > 0.
  *  - Excess (Amount Paid − Allocated) must be exactly 0.
  * (rowError — a previous bulk failure — does NOT block: failed rows keep
  * their amounts for Retry failed.)
  */
-export function validateAllocation(header: PaymentHeader, rows: AllocationRow[]): ValidationResult {
+/** `bulkAmountAsString` defaults to BULK_AMOUNT_AS_STRING (build-payload.ts). */
+export type AmountOptions = { bulkAmountAsString?: boolean };
+
+export function validateAllocation(header: PaymentHeader, rows: AllocationRow[], opts: AmountOptions = {}): ValidationResult {
   const errors = emptyErrors();
   const h = validateHeader(header);
   errors.header = h.errors;
 
   const selected: ValidatedSubmission["rows"] = [];
   rows.forEach((row, i) => {
-    const amountPaise = rowAmountPaise(row.amount);
+    const zero = BigInt(0);
+    const amountUnits = rowAmountUnits(row.amount);
     // rDash amounts are decimal strings ("29500.0000") — parsed exactly.
-    const duePaise = rdashPaise(row.config.payment_due);
-    let msg = checkRowAmount(amountPaise, duePaise, { allowZero: true });
-    if (!msg && amountPaise !== null && amountPaise > 0) {
+    const dueUnits = rdashUnits(row.config.payment_due);
+    let msg = checkRowAmount(amountUnits, dueUnits, { allowZero: true, ...opts });
+    if (!msg && amountUnits !== null && amountUnits > zero) {
       const issue = rowAmountIssue(row);
       if (issue) msg = issue;
       else if (row.detailsUnavailable) msg = MESSAGES.detailsUnavailable;
       else if (row.detailsError) msg = MESSAGES.detailsError;
       else if (!isPayableStatus(row.config.status)) msg = MESSAGES.notPayableStatus;
-      else if (duePaise === null || duePaise <= 0) msg = MESSAGES.nothingDue;
+      else if (dueUnits === null || dueUnits <= zero) msg = MESSAGES.nothingDue;
     }
     if (msg) {
       errors.rows[i] = { amount: msg };
       return;
     }
-    if (amountPaise !== null && amountPaise > 0) {
+    if (amountUnits !== null && amountUnits > zero) {
       const remark = optionalText(row.remark).value;
-      selected.push({ payment_request_id: row.config.payment_request_id, amountPaise, remark });
+      selected.push({ payment_request_id: row.config.payment_request_id, amountUnits, remark });
     }
   });
 
@@ -213,7 +227,7 @@ export function validateAllocation(header: PaymentHeader, rows: AllocationRow[])
   if (!hasRowErrors && selected.length === 0) errors.form.push(MESSAGES.noSelection);
   if (h.value && !hasRowErrors && selected.length > 0) {
     const totals = computeTotals(header.amountPaid, rows);
-    const excess = checkExcess(h.value.amountPaidPaise, totals.allocatedPaise);
+    const excess = checkExcess(h.value.amountPaidUnits, totals.allocatedUnits);
     if (excess) errors.form.push(excess);
   }
 
@@ -237,6 +251,7 @@ export function validateAllocation(header: PaymentHeader, rows: AllocationRow[])
 export function validateSubmission(
   body: { header?: unknown; rows?: unknown },
   freshConfig: VendorPaymentRequestConfigItem[],
+  opts: AmountOptions = {},
 ): ValidationResult {
   const errors = emptyErrors();
   const rowErr = (i: number, field: string, msg: string) => {
@@ -276,19 +291,19 @@ export function validateSubmission(
         rowErr(i, "payment_request_id", MESSAGES.notPayableStatus);
         rowOk = false;
       }
-      // Fresh rDash amount (decimal string) — exact paise or an explicit error.
+      // Fresh rDash amount (decimal string) — exact units or an explicit error.
       const due = cfg ? parseRdashAmount(cfg.payment_due) : null;
-      const duePaise = due && due.ok ? due.paise : null;
+      const dueUnits = due && due.ok ? due.units : null;
       const issue = cfg && isPayableStatus(cfg.status) ? rowAmountIssue({ config: cfg }) : null;
       if (issue) {
         rowErr(i, "payment_request_id", issue);
         rowOk = false;
-      } else if (cfg && isPayableStatus(cfg.status) && (duePaise === null || duePaise <= 0)) {
+      } else if (cfg && isPayableStatus(cfg.status) && (dueUnits === null || dueUnits <= BigInt(0))) {
         rowErr(i, "payment_request_id", MESSAGES.nothingDue);
         rowOk = false;
       }
-      const amountPaise = toPaise(r.amount);
-      const amountMsg = checkRowAmount(amountPaise, duePaise, { allowZero: false });
+      const amountUnits = userUnits(r.amount);
+      const amountMsg = checkRowAmount(amountUnits, dueUnits, { allowZero: false, ...opts });
       if (amountMsg) {
         rowErr(i, "amount", amountMsg);
         rowOk = false;
@@ -298,17 +313,23 @@ export function validateSubmission(
         rowErr(i, "remark", MESSAGES.remark);
         rowOk = false;
       }
-      if (rowOk && amountPaise !== null) {
-        rows.push({ payment_request_id: id, amountPaise, remark: remark.value });
+      if (rowOk && amountUnits !== null) {
+        rows.push({ payment_request_id: id, amountUnits, remark: remark.value });
       }
     });
   }
 
   const hasRowErrors = Object.keys(errors.rows).length > 0;
-  if (h.value && !hasRowErrors && rows.length > 0) {
+  // One currency per submission (fresh config): amounts in different
+  // currencies are never summed against one Amount Paid.
+  if (!hasRowErrors && rows.length > 1) {
+    const fresh = rows.map((r) => byId.get(r.payment_request_id)!);
+    if (distinctCurrencyCodes(fresh).size > 1) errors.form.push(MESSAGES.mixedCurrency);
+  }
+  if (h.value && !hasRowErrors && rows.length > 0 && !errors.form.includes(MESSAGES.mixedCurrency)) {
     const excess = checkExcess(
-      h.value.amountPaidPaise,
-      rows.reduce((s, r) => s + r.amountPaise, 0),
+      h.value.amountPaidUnits,
+      rows.reduce((t, r) => t + r.amountUnits, BigInt(0)),
     );
     if (excess) errors.form.push(excess);
   }

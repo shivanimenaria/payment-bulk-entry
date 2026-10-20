@@ -27,8 +27,9 @@ Open Bulk Payment sub-tab (vendor_id from iframe URL) → /payments (list) → +
 ## UI Layout
 Matches rDash's **Manage Vendor → Vendor Payments** screen. Sources: `docs/ui-reference/` (read-only — never modify): `rdash-web/src/styles/global-style.css`, `rdash-web/src/containers/payment-request/**`, `rdash-web/expense-icon.svg`, `screenshots/01…05`. Values not in the CSS (`RDStepper`, `RDLabel`, filter inputs, chrome) were measured from the screenshot pixels (Retina, 1 CSS px = 2 px).
 ```
-[mock only: rDash sidebar | All Vendors/<vendor> · tabs (Vendor Payments) · Currency : INR]
+[mock only: rDash sidebar | All Vendors/<vendor> · tabs (Vendor Payments)]
 [mock only: sub-tabs All Requests | … | Payment Entries | Bulk Payment Entry (active)  MOCK DATA]
+                                                            Currency : INR ▾   ← CurrencyFilter (top-right, real + mock)
 ┌ Amount paid* · Payment date* · Payment mode* · Reference / UTR · Remark ┐   ← white box, filter-style inputs
 [▤ Total Due (n)] [▢ Amount Paid] [☰ Allocated (n)] [⚖ Excess]               ← PaymentRequestAmountCard ×4
 ┌ Payment due · N of M selected ═══ (stepper, active)   Clear applied amount ┐
@@ -56,7 +57,7 @@ Fix-before-submitting list · Result panel · Payload preview (mock)
 | status colours | approved `rgb(97 199 205)`, pending `rgb(234 146 69)`, rejected `rgb(236 67 67)`, hold `rgb(242 177 80)`, cancelled red | `--theme-brand-color-*`, `getStatusColor` |
 | radius | 6px boxes (`.rounded-6`), 3px inputs/labels | CSS, screenshot |
 
-**Typography**: Gilroy; normal text = the Gilroy *regular* file (rDash `font-regular`; our weight 400), semibold = Gilroy semibold (600). Sizes: tabs/stepper 14px (active semibold); table header labels 12px semibold; rows 14px; filter inputs 12px; card title 16px semibold; card value 20px semibold (`₹ 2,00,000`, `formatCardINR`); empty text 24px semibold; breadcrumb 17px + 18px bold (mock frame).
+**Typography**: Gilroy; normal text = the Gilroy *regular* file (rDash `font-regular`; our weight 400), semibold = Gilroy semibold (600). Sizes: tabs/stepper 14px (active semibold); table header labels 12px semibold; rows 14px; filter inputs 12px; card title 16px semibold; card value 20px semibold (`₹ 2,00,000`, `formatCardUnits`); empty text 24px semibold; breadcrumb 17px + 18px bold (mock frame).
 
 **Components**
 - **Page**: `#f9fafb` background, 20px padding and 20px gaps; white `.border .rounded-6` boxes; no page title / currency line (rDash draws them around the iframe).
@@ -67,6 +68,9 @@ Fix-before-submitting list · Result panel · Payload preview (mock)
 - **States**: loading = rDash rows loader (10 rows, `p-20`, `border-b`, MUI-style skeleton bars); empty = `NoPaymentEntry`: `ExpenseIcon` (`components/rd/ExpenseIcon.tsx`, copied from `expense-icon.svg`) 90×90 + "No payable requests to show" 24px semibold `#d0d5dd`, centred, gap 20; load error = red text + outlined Retry inside the box.
 - **Result panel / validation list / payload preview**: white `.border .rounded-6` boxes, `p-15`; coloured text/icons only (approved cyan, pending orange, red).
 - **Mock-only preview frame** (`components/shell/RdashPreviewFrame.tsx`, renders only when `/api/auth/me` reports `dataSource=mock`): static copy of rDash's chrome — 72px white left icon sidebar (red 39px active item), 58px header with "All Vendors/<mock vendor>" breadcrumb, check/bell icons and user pill, the Basic Details … Vendor Payments tabs (Vendor Payments active) with "Currency : INR", and a sub-tab row "All Requests | Pending Requests | Approved Requests | Payment Due | Payment Entries | Bulk Payment Entry" (Bulk Payment Entry active) holding the MOCK DATA badge. `aria-hidden`, no links or handlers. In real mode none of it renders — rDash provides it around the iframe.
+- **Currency filter** (`components/rd/CurrencyFilter.tsx`, rules in `lib/payments/currency.ts`): top-right "Currency : <CODE> ▾" (14px); opens a dropdown with a "Search Currency" box (matches name or code) and "<name> - <code>" options sorted by name. Exactly one currency among the payable rows → auto-selected; several → "Currency : Select" and the table shows "Select a currency to see payment requests" (no default, no guess). Only rows of the selected currency are shown, counted and totalled. Switching currency with amounts entered asks for confirmation and clears them.
+- **Request Type** (`formatRequestType`): `non_order` → Non Order, `po_advance` → PO Advance, `invoice` → Invoice, others Title Case; `""` / null → "—".
+- **Long amounts** (up to 29 digits): amount columns are fixed width (150px) and summary-card values truncate — ellipsis with the full value in a `title` tooltip; never wrap, never break the layout.
 - No vendor field: the vendor is fixed by the iframe URL / session.
 
 ### Key Rules
@@ -80,9 +84,16 @@ Fix-before-submitting list · Result panel · Payload preview (mock)
   - Each entry's `remark` = that row's Remarks (`null` if empty).
 - `payment_date`, `payment_mode` and `transaction_id` come from the header for every entry (no per-row payment date).
 - Submit only when Excess = 0 and there are no validation errors.
-- Payment Done: number, `≤ payment_due`, max 2 decimals; only rows with `amount > 0` are sent.
+- **Money** (`lib/payments/money.ts`): exact fixed-point, scale 4 — BigInt units of 0.0001 for parsing, totals, excess, Pay in Full, validation and retry. **Never `Number()` / `parseFloat` for money.** Constants `MAX_RDASH_INT_DIGITS = 29`, `MAX_SUBMIT_INT_DIGITS = 20`, `MAX_DECIMALS = 4`.
+  - **Read limit** (rDash amounts — config/details `request_amount`, `paid_amount`, `payment_due`): DECIMAL(33,4) → ≤ 29 integer digits, ≤ 4 decimals (extra zero decimals tolerated). Parsed and displayed exactly; anything else → "Invalid amount from rDash" (row locked, excluded from totals with a note).
+  - **Submit limit** (Amount paid, Payment Done, Pay in Full result — the POST bulk API): max `99999999999999999999.9999` (20 integer digits, ≤ 4 decimals). Out of range, 5+ decimals, negative, exponent or non-numeric → "Max amount is 99,999,999,999,999,999,999.9999 (20 digits, 4 decimals)". Inputs block typing beyond 20 integer digits / 4 decimals (`isAllowedAmountInput`).
+  - A row whose `payment_due` exceeds the submit limit is shown normally and **counted in Total Due**, but Pay in Full and its input are disabled and it shows "Payment due exceeds the bulk API limit" (can't be paid from PBE; the server rejects it too).
+  - **Payload form** (`build-payload.ts`, `BULK_AMOUNT_AS_STRING = false`, TODO(verify) — docs/api-notes.md #19): Swagger types `amount` as `number($float)`. While false, an amount is sent as a JSON number only if it round-trips exactly (≤ 15 significant digits); otherwise the submission is rejected before rDash is called with "Amount too large to submit exactly (rDash API takes numbers) — max 15 significant digits until rDash confirms string amounts". Never a rounded number. When true, the exact decimal string is sent (e.g. `"99999999999999999999.9999"`).
+  - **Display** (`formatUnits` / `formatRdashAmount` / `formatMoneyUnits` / `formatCardUnits`): exact digit strings, Indian grouping, 2 decimals normally and up to 4 when the 3rd/4th are non-zero; never rounded.
+- Payment Done: `≤ payment_due` and within the submit limit; only rows with `amount > 0` are sent.
+- **One currency per payment**: the table shows only the selected currency's rows; the server rejects a submission whose rows (fresh config) span currencies with "All payments must be in the same currency".
 - **Payable filter** (`lib/payments/payable.ts`, one shared rule — `PAYABLE_STATUSES`, `isPayableStatus`, `isPayable`): a request is shown only if BOTH (a) config `status` is one of `pending`, `approved`, `submitted` (exact lowercase match; any other or missing status → excluded, never guessed or case-folded) AND (b) `payment_due > 0`. Status values are rDash's `PAYMENT_REQUEST_STATUS` (pending, approved, rejected, cancelled, hold, submitted). `/api/rdash/payment-requests` drops non-payable rows **before** any details call.
-- Validation runs on client **and** server with the SAME functions (`lib/payments/validation.ts`: `validateAllocation` for the form, `validateSubmission` for the route; shared `validateHeader`, `checkRowAmount`, `checkExcess`, money in integer paise via `money.ts`). Errors are field-keyed (`form` / `header` / `rows[index]`) plus a flat `summary` list.
+- Validation runs on client **and** server with the SAME functions (`lib/payments/validation.ts`: `validateAllocation` for the form, `validateSubmission` for the route; shared `validateHeader`, `checkRowAmount`, `checkExcess`, exact BigInt units via `money.ts`; both enforce the submit limit). Errors are field-keyed (`form` / `header` / `rows[index]`) plus a flat `summary` list.
 - Rows with `detailsUnavailable` or `detailsError` cannot take an amount > 0 — **client-only** rule (`validateAllocation`); the bulk route deliberately does not check `project_id` / details. `rowError` (a previous bulk failure) does **not** block: failed rows keep their amounts for Retry failed.
 - **Vendor = session vendor.** `api/rdash/payment-requests` and `api/rdash/payment-entries/bulk` use `auth.vendorId` from the session and ignore any vendor id sent by the client (query or body) — never read, compared or forwarded.
 - **Server never trusts client payment data.** The bulk route re-fetches the session vendor's config (all pages, user's token) and validates every row against it: `payment_request_id` must be in the fresh list, unique within the submission, have a payable `status` (else "This payment request can't be paid in its current status"), `payment_due > 0`, and `amount ≤` the **server-fetched** `payment_due`. Client-sent `payment_due` / amounts-due are ignored. Any invalid, duplicate or unknown row rejects the whole submission (400) before the bulk API is called.
@@ -199,10 +210,10 @@ Base: `RDASH_API_URL`. List endpoints **must** go through `paginateRdash` — ne
 - **Vendors**: `id, name, code`
 - **Projects** (DRF page, like config): `results[]` → `id, job_id, name, created_at, is_archived, is_deleted`
 - **Config** (`PaginatedVendorPaymentRequestConfigOutputEntity`) — **DRF pagination**: `{ data: { count, next, previous, results[] } }` (real sample: `tests/fixtures/real-config-page.json`). `results[]` → `payment_request_id, project_id (required), status, request_amount, paid_amount, payment_due, currency { id: string|null, name, symbol, code, locale? }`. Paged by `paginateRdashDrf`: follow `next` until null (same origin/path as `RDASH_API_URL` only), total must equal `count`, else `RdashResponseShapeError`.
-- **Money**: amounts are **decimal strings** with up to 4 decimals (`"29500.0000"`, `"0"`, `"0.0"`); details amounts may be strings or numbers. Parse ONLY with `parseRdashAmount` (`lib/payments/money.ts`): exact integer paise when digits beyond 2 decimals are zero; sub-paisa / malformed → invalid (never rounded); beyond `Number.MAX_SAFE_INTEGER` paise → too large. Such a row shows "Amount too large to process" / "Invalid amount from rDash", can't take a payment, is excluded from totals (with a note), and is rejected by the server. Display via `formatRdashAmount` (digit-string based, exact for any size). Currency symbol from `currency.symbol` (`lib/payments/currency.ts`).
+- **Money**: amounts are **decimal strings** with up to 4 decimals (`"29500.0000"`, `"0"`, `"0.0"`); details amounts may be strings or numbers. Parse ONLY with `parseRdashAmount` (`lib/payments/money.ts`): exact BigInt units (0.0001) within DECIMAL(33,4) — ≤ 29 integer digits, ≤ 4 decimals; anything else → "Invalid amount from rDash" (never rounded; row locked, excluded from totals, rejected by the server). See Key Rules → Money for the submit limit. Display via `formatRdashAmount` (digit-string based, exact for any size). Currency symbol from `currency.symbol` (`lib/payments/currency.ts`).
 - **Statuses seen**: approved, pending, submitted, cancelled.
 - **Details** (`PaymentRequestDetailsOutputEntity`): `id, request_id?, request_number?, vendor{id,name}, client{id,name}, request_type, requested_by {id, name} | null, requested_at, invoice?{id,number}, purchase_order?{id,number}, request_amount_without_tax, tax_amount, total_request_amount, paid_till_date, payment_due, remark?, due_date?, request_status, attachments[] {id, file, name, uploaded_by{id,name}, uploaded_at}`
-- **Bulk input** (`ExternalBulkPaymentEntryCreateInputEntity`): body **`{ entries: [...] }`** (Swagger's "data" is only the body param name; `BULK_BODY_WRAPPER = "entries"`). `entries[]` → `payment_request_id*, amount* (number, ≤ 2 decimals), payment_mode*, payment_date* ("YYYY-MM-DD"), transaction_id?, transaction_proof_file_url?, transaction_proof_file_name?, remark?`
+- **Bulk input** (`ExternalBulkPaymentEntryCreateInputEntity`): body **`{ entries: [...] }`** (Swagger's "data" is only the body param name; `BULK_BODY_WRAPPER = "entries"`). `entries[]` → `payment_request_id*, amount* (Swagger number($float); exact JSON number ≤ 15 significant digits, or exact decimal string when BULK_AMOUNT_AS_STRING — max 20 integer digits + 4 decimals), payment_mode*, payment_date* ("YYYY-MM-DD"), transaction_id?, transaction_proof_file_url?, transaction_proof_file_name?, remark?`
 - **Bulk output** (`BulkPaymentEntryCreateOutputEntity`, confirmed): `count, created[]{id, payment_request_id}, failed[]{payment_request_id, error}`
 
 ### Cross-project gap — resolved
@@ -249,7 +260,7 @@ Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not ha
 
 All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map errors via `lib/server/route-errors.ts` (401 / 403 fixed message / 502 generic). Bulk details:
 - Body `{ header, rows: [{ payment_request_id, amount, remark }] }`; only those fields are read. A vendor id in the body is ignored; a vendor id in the **query** that differs from the session makes `getAuth` refuse the request (401).
-- Validation (`lib/payments/validation.ts`, money in integer paise) → `400 { error: "Validation failed", fieldErrors: { form[], header{}, rows{ [index]: { field: msg } } } }`; the bulk API is not called.
+- Validation (`lib/payments/validation.ts`, exact BigInt units) → `400 { error: "Validation failed", fieldErrors: { form[], header{}, rows{ [index]: { field: msg } } } }`; the bulk API is not called.
 - If rDash's `created` + `failed` don't cover every submitted id exactly once → `502` ("Could not confirm which payments were recorded…"): nothing is reported as "not recorded", so a retry can't pay twice.
 - The 400 body also carries `summary: string[]`.
 - Retry failed (`lib/payments/retry.ts`) resends only ids in `failed[]` with Amount Paid = their sum; an id in neither list is never resent.
@@ -313,7 +324,7 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 - **No silent fallbacks** — no default values for missing data, no alternate sources. Surface errors. **Intentional exception:** bootstrap posts the constant `rdash_iframe_ready` signal with `targetOrigin "*"` when the parent origin can't be detected — it carries no secret, the handover reply (with the code) is always origin-checked against `NEXT_PUBLIC_RDASH_UI_ORIGIN`, and origin detection fails in some browsers (no `ancestorOrigins`, stripped referrer).
 - **Never invent API fields.** Unverified behavior is isolated, marked `TODO(verify)`, and listed in `docs/api-notes.md`.
 - Generic error responses; detailed `console.error` for server logs.
-- Currency INR (₹), Indian number format. Color: red primary `#E53935`. Font: Gilroy.
+- Currency from `currency.symbol` (one currency per payment, see the currency filter), Indian number format, exact money (never floats). Color: red primary `#E53935`. Font: Gilroy.
 - Work in small steps; after each task list changed files + how to test. Ask when unclear. Don't commit unless asked.
 - Never modify anything outside this repo (especially `<RFQ_PATH>`). Never touch `.env.local`.
 
@@ -339,7 +350,8 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 - **Duplicate `transaction_id`** across entries of one payment — allowed?
 - **Payable statuses**: now `pending` / `approved` / `submitted` (from rdash-web `PAYMENT_REQUEST_STATUS`; the constants file itself is not in `docs/ui-reference`, only components using its keys). rDash still to confirm **`submitted` is payable**, and that the config endpoint returns these exact lowercase values (docs/api-notes.md #16).
 - **Business rules**: overpay, future `payment_date`, `transaction_id` required for non-cash modes.
-- **Currency**: shape resolved (`{ id, name, symbol, code, locale? }`); still open: mixed currencies for one vendor (totals show "—" + "Mixed currencies" if it happens).
+- **Currency**: shape resolved (`{ id, name, symbol, code, locale? }`). A vendor can have payable requests in several currencies — handled with the currency filter (one currency per payment; server rejects mixes).
+- **Bulk `amount` as a decimal string**: is it a DecimalField that accepts `"99999999999999999999.9999"`? Until confirmed, `BULK_AMOUNT_AS_STRING = false` caps submits at 15 significant digits (docs/api-notes.md #19).
 - **Permissions**: `CAN_*` required for config, details, bulk.
 - **rdash-api logging**: confirm `X-Pbe-Referer/Origin/User-Agent/Client-Ip` are bound (only `X-Rfq-*` known).
 - **Payments list page**: no API to list past payment entries yet.

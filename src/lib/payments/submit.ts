@@ -2,7 +2,7 @@
 // "Table refetches after every submit"). Pure; used by the client.
 import type { AllocationRow, BulkSubmitRequest, BulkSubmitResult } from "@/types/payments";
 import type { FieldErrors } from "./validation";
-import { toPaise } from "./money";
+import { decimalUnits, userUnits, type Units } from "./money";
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -14,8 +14,8 @@ export function isBulkSubmitResult(v: unknown): v is BulkSubmitResult {
   const failed = v.failed;
   return (
     typeof v.count === "number" &&
-    typeof v.recordedAmount === "number" &&
-    typeof v.notRecordedAmount === "number" &&
+    decimalUnits(v.recordedAmount) !== null &&
+    decimalUnits(v.notRecordedAmount) !== null &&
     Array.isArray(created) &&
     created.every((c) => isObj(c) && typeof c.payment_request_id === "string") &&
     Array.isArray(failed) &&
@@ -88,12 +88,12 @@ export function mapServerRowErrors(
   return out;
 }
 
-/** payment_request_id → amount sent (paise), for the result lists. */
-export function sentAmounts(request: BulkSubmitRequest): Map<string, number> {
-  const out = new Map<string, number>();
+/** payment_request_id → amount sent (exact units), for the result lists. */
+export function sentAmounts(request: BulkSubmitRequest): Map<string, Units> {
+  const out = new Map<string, Units>();
   for (const r of request.rows) {
-    const p = toPaise(r.amount);
-    if (p !== null) out.set(r.payment_request_id, p);
+    const u = userUnits(r.amount);
+    if (u !== null) out.set(r.payment_request_id, u);
   }
   return out;
 }

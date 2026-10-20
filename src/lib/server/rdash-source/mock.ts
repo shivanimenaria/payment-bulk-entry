@@ -8,7 +8,7 @@ import type {
   VendorPaymentRequestConfigItem,
 } from "@/types/rdash";
 import type { RdashSource } from "./types";
-import { paiseToRdash, rdashPaise, toPaise } from "@/lib/payments/money";
+import { rdashUnits, unitsToRdash, userUnits } from "@/lib/payments/money";
 import projectsJson from "./mock-data/projects.json";
 import mockVendorConfigJson from "./mock-data/config.mock-vendor.json";
 import detailsJson from "./mock-data/details.json";
@@ -129,15 +129,11 @@ export function createMockSource(): RdashSource {
           out.failed.push({ payment_request_id: entry.payment_request_id, error: "Forced failure (MOCK_FAIL_IDS)" });
           continue;
         }
-        if (!(entry.amount > 0)) {
-          out.failed.push({ payment_request_id: entry.payment_request_id, error: "Invalid amount" });
-          continue;
-        }
-        // rDash amounts are decimal strings; arithmetic in exact paise.
-        const amount = toPaise(entry.amount);
-        const due = rdashPaise(cfg.payment_due);
-        const paid = rdashPaise(cfg.paid_amount);
-        if (amount === null || due === null || paid === null) {
+        // Exact units; entry.amount is a number or an exact decimal string.
+        const amount = userUnits(entry.amount);
+        const due = rdashUnits(cfg.payment_due);
+        const paid = rdashUnits(cfg.paid_amount);
+        if (amount === null || amount <= BigInt(0) || due === null || paid === null) {
           out.failed.push({ payment_request_id: entry.payment_request_id, error: "Invalid amount" });
           continue;
         }
@@ -145,8 +141,8 @@ export function createMockSource(): RdashSource {
           out.failed.push({ payment_request_id: entry.payment_request_id, error: "Amount exceeds payment due" });
           continue;
         }
-        cfg.paid_amount = paiseToRdash(paid + amount);
-        cfg.payment_due = paiseToRdash(due - amount);
+        cfg.paid_amount = unitsToRdash(paid + amount);
+        cfg.payment_due = unitsToRdash(due - amount);
         const details = store().details.find((d) => d.id === entry.payment_request_id);
         if (details) {
           details.paid_till_date = cfg.paid_amount;

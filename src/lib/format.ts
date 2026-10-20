@@ -1,19 +1,7 @@
+import { formatUnits, rdashUnits, type Units } from "./payments/money";
 // Display formatting (client-safe). Null/undefined render as "—" — never a
 // substituted default.
 export const DASH = "—";
-
-const inr = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-/** Indian grouping, 2 decimals: 123456.5 → "1,23,456.50". */
-export function formatAmount(value: number | null | undefined): string {
-  return value === null || value === undefined || !Number.isFinite(value) ? DASH : inr.format(value);
-}
-
-/** "₹1,23,456.50" */
-export function formatINR(value: number | null | undefined): string {
-  const s = formatAmount(value);
-  return s === DASH ? s : `₹${s}`;
-}
 
 const istDate = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
@@ -40,53 +28,55 @@ export function formatStatus(value: string | null | undefined): string {
 }
 
 /** Plain text, or "—" when null/empty. */
+/** Plain text; null, undefined, "" or whitespace-only → "—" (never shown blank). */
 export function textOrDash(value: string | null | undefined): string {
-  return value === null || value === undefined || value === "" ? DASH : value;
+  return value === null || value === undefined || value.trim() === "" ? DASH : value;
 }
 
-const inrWhole = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
+// rDash request types (exact labels for known values).
+const REQUEST_TYPE_LABELS: Record<string, string> = {
+  non_order: "Non Order",
+  po_advance: "PO Advance",
+  invoice: "Invoice",
+};
 
-/** Summary-card style (rDash): "₹ 2,00,000"; paise are shown when present
- *  ("₹ 29,999.50") — never rounded away. */
-export function formatCardINR(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
-  return Number.isInteger(value) ? `₹ ${inrWhole.format(value)}` : `₹ ${inr.format(value)}`;
+/** Request Type like rDash: known values → their labels; any other value →
+ *  underscores to spaces + Title Case ("running_bill" → "Running Bill");
+ *  null / "" → "—". */
+export function formatRequestType(value: string | null | undefined): string {
+  if (value === null || value === undefined || value.trim() === "") return DASH;
+  const known = REQUEST_TYPE_LABELS[value];
+  if (known) return known;
+  return value
+    .trim()
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/** Indian digit grouping on a plain integer digit string (works for any size). */
-function groupIndian(whole: string): string {
-  const w = whole.replace(/^0+(?=\d)/, "");
-  if (w.length <= 3) return w;
-  const last3 = w.slice(-3);
-  const rest = w.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",");
-  return `${rest},${last3}`;
-}
+// ── Money display (exact; lib/payments/money.ts units) ────────
+// Never Number()/Intl for money: formatting works on the digit string, so
+// any size is shown exactly and nothing is rounded.
 
-/**
- * rDash amount (decimal string like "29500.0000", or a number) → "29,500.00",
- * computed on the digits (no float), so even amounts too large to process are
- * shown exactly. Sub-paisa values keep their real digits ("12.3456" →
- * "12.3456") — never rounded. Non-decimal input is shown raw; null → "—".
- */
+/** rDash amount ("29500.0000" or a number) → "29,500.00" (2–4 decimals,
+ *  exact). Invalid → the raw value as given (never hidden, never rounded);
+ *  null / "" → "—". */
 export function formatRdashAmount(value: unknown): string {
-  if (value === null || value === undefined || value === "") return DASH;
-  const text = typeof value === "number" ? (Number.isFinite(value) ? String(value) : "") : String(value).trim();
-  const m = /^(\d+)(?:\.(\d+))?$/.exec(text);
-  if (!m) return text || DASH;
-  const [, whole, frac = ""] = m;
-  const shown = /[1-9]/.test(frac.slice(2)) ? frac.replace(/0+$/, "") : frac.slice(0, 2).padEnd(2, "0");
-  return `${groupIndian(whole)}.${shown}`;
+  if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) return DASH;
+  const units = rdashUnits(value);
+  return units === null ? String(value) : formatUnits(units);
 }
 
-/** "₹ 2,00,000" style with a given currency symbol (null symbol → number only). */
-export function formatCardAmount(value: number | null | undefined, symbol: string | null): string {
-  const s = formatCardINR(value);
-  if (s === DASH) return s;
-  return symbol === "₹" ? s : symbol ? s.replace(/^₹ /, `${symbol} `) : s.replace(/^₹ /, "");
+/** "1,23,456.50" with an optional currency symbol prefix ("₹1,23,456.50"). */
+export function formatMoneyUnits(units: Units | null | undefined, symbol: string | null): string {
+  if (units === null || units === undefined) return DASH;
+  return `${symbol ?? ""}${formatUnits(units)}`;
 }
 
-/** "₹1,23,456.50" style with a given currency symbol (null symbol → number only). */
-export function formatMoney(value: number | null | undefined, symbol: string | null): string {
-  const s = formatAmount(value);
-  return s === DASH ? s : `${symbol ?? ""}${s}`;
+/** Summary-card style (rDash): "₹ 2,00,000"; decimals only when non-zero
+ *  ("₹ 29,999.50", "₹ 0.0001"). */
+export function formatCardUnits(units: Units | null | undefined, symbol: string | null): string {
+  if (units === null || units === undefined) return DASH;
+  const n = formatUnits(units, { wholeOnlyIfInteger: true });
+  return symbol ? `${symbol} ${n}` : n;
 }

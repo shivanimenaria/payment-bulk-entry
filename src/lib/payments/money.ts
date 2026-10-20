@@ -1,86 +1,158 @@
-// Paise-safe money helpers. Pure; shared by validation, totals, retry and the
-// client. All arithmetic on money happens in integer paise.
+// Exact money. Pure; shared by client and server.
+//
+// Model: fixed-point with SCALE 4 — a value is a BigInt count of 0.0001
+// ("units"). Parsing, totals, comparisons, Pay in Full, retry, payloads all
+// use units. Never Number() / parseFloat for money (the only conversion to a
+// JS number is unitsToExactNumber, for the bulk API, and it refuses anything
+// that wouldn't round-trip exactly).
+//
+// Limits:
+//   - READ from rDash (config / details amounts): DECIMAL(33,4) →
+//     ≤ MAX_RDASH_INT_DIGITS integer digits, ≤ MAX_DECIMALS decimals.
+//   - ENTER / SUBMIT (Amount paid, Payment Done, Pay in Full result): the POST
+//     bulk API limit 99999999999999999999.9999 → ≤ MAX_SUBMIT_INT_DIGITS
+//     integer digits, ≤ MAX_DECIMALS decimals.
 
-const MONEY_RE = /^\d+(\.\d{1,2})?$/;
+export const MAX_RDASH_INT_DIGITS = 29;
+export const MAX_SUBMIT_INT_DIGITS = 20;
+export const MAX_DECIMALS = 4;
 
-/** Parse a user/JSON money value into integer paise. Accepts a plain decimal
- *  string ("1200", "1200.5", "1200.50") or a finite number with at most 2
- *  decimals. Anything else (negative, exponent, >2 decimals, NaN) → null. */
-export function toPaise(value: unknown): number | null {
-  let str: string;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || value < 0) return null;
-    str = String(value);
-  } else if (typeof value === "string") {
-    str = value.trim();
-  } else {
-    return null;
+/** Money in units of 0.0001. */
+export type Units = bigint;
+
+const SCALE: Units = BigInt(10000);
+const ZERO: Units = BigInt(0);
+/** 99999999999999999999.9999 in units. */
+export const MAX_SUBMIT_UNITS: Units = BigInt("9".repeat(MAX_SUBMIT_INT_DIGITS + MAX_DECIMALS));
+
+export const SUBMIT_LIMIT_MESSAGE = "Max amount is 99,999,999,999,999,999,999.9999 (20 digits, 4 decimals)";
+
+const DECIMAL_RE = /^(\d+)(?:\.(\d+))?$/;
+
+/** Plain non-negative decimal text → units, with digit limits. Extra decimal
+ *  digits are accepted only when they are zeros ("1.50000"); otherwise null.
+ *  `maxInt` null = no integer-digit limit (sums for display). */
+function parseDecimalText(text: string, maxInt: number | null, maxDec: number, allowTrailingZeroDecimals: boolean): Units | null {
+  const m = DECIMAL_RE.exec(text);
+  if (!m) return null;
+  const whole = m[1].replace(/^0+(?=\d)/, "");
+  let frac = m[2] ?? "";
+  if (frac.length > maxDec) {
+    if (!allowTrailingZeroDecimals || /[1-9]/.test(frac.slice(maxDec))) return null;
+    frac = frac.slice(0, maxDec);
   }
-  if (!MONEY_RE.test(str)) return null;
-  const [whole, frac = ""] = str.split(".");
-  const paise = Number(whole) * 100 + Number(frac.padEnd(2, "0"));
-  return Number.isSafeInteger(paise) ? paise : null;
+  if (maxInt !== null && whole.length > maxInt) return null;
+  return BigInt(whole) * SCALE + BigInt(frac.padEnd(MAX_DECIMALS, "0"));
 }
 
-export const fromPaise = (paise: number): number => paise / 100;
-
-/** Paise → plain decimal string for an input / request body (120050 → "1200.5", 100 → "1"). */
-export const paiseToInput = (paise: number): string => {
-  const whole = Math.floor(paise / 100);
-  const frac = paise % 100;
-  return frac === 0 ? String(whole) : `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
-};
-
-/** A row's Payment Done input: "" (or whitespace) means "not paying this row" = 0. */
-export function rowAmountPaise(amount: unknown): number | null {
-  if (typeof amount === "string" && amount.trim() === "") return 0;
-  return toPaise(amount);
+/** JSON number → its decimal text, or null if it's not a plain finite
+ *  non-negative number (no exponent forms). */
+function numberText(value: number): string | null {
+  if (!Number.isFinite(value) || value < 0) return null;
+  const s = String(value);
+  return /e/i.test(s) ? null : s;
 }
 
-// ── rDash amounts ─────────────────────────────────────────────
-// rDash sends money as DECIMAL STRINGS with up to 4 decimals ("29500.0000",
-// "0", "0.0", "11.0000"); some fields may still be JSON numbers. Converted to
-// integer paise only when every digit beyond the 2nd decimal is zero — a
-// sub-paisa value ("12.3456") or anything that isn't a plain non-negative
-// decimal is INVALID (never rounded). Values beyond Number.MAX_SAFE_INTEGER
-// paise are TOO LARGE (e.g. "2000000000000000000000000000.0000").
-export type RdashAmountResult =
-  | { ok: true; paise: number }
-  | { ok: false; reason: "invalid" | "too_large" };
+// ── Reading rDash amounts ─────────────────────────────────────
+export type RdashAmountResult = { ok: true; units: Units } | { ok: false; reason: "invalid" };
 
-const RDASH_DECIMAL_RE = /^(\d+)(?:\.(\d+))?$/;
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
-
-/** Canonical decimal text for an rDash amount (string as-is; finite number via String). */
-function rdashAmountText(value: unknown): string | null {
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-    const s = String(value);
-    return /e/i.test(s) ? null : s;
-  }
-  return null;
-}
-
+/** rDash amount (decimal string like "29500.0000"; details may use numbers):
+ *  ≤ 29 integer digits, ≤ 4 decimals (zeros beyond are tolerated). Anything
+ *  else → invalid ("Invalid amount from rDash"). */
 export function parseRdashAmount(value: unknown): RdashAmountResult {
-  const text = rdashAmountText(value);
-  const m = text === null ? null : RDASH_DECIMAL_RE.exec(text);
-  if (!m) return { ok: false, reason: "invalid" };
-  const [, whole, frac = ""] = m;
-  if (/[1-9]/.test(frac.slice(2))) return { ok: false, reason: "invalid" }; // sub-paisa digits
-  const paise = BigInt(whole) * BigInt(100) + BigInt(frac.slice(0, 2).padEnd(2, "0"));
-  if (paise > MAX_SAFE) return { ok: false, reason: "too_large" };
-  return { ok: true, paise: Number(paise) };
+  const text = typeof value === "string" ? value.trim() : typeof value === "number" ? numberText(value) : null;
+  const units = text === null ? null : parseDecimalText(text, MAX_RDASH_INT_DIGITS, MAX_DECIMALS, true);
+  return units === null ? { ok: false, reason: "invalid" } : { ok: true, units };
 }
 
-/** Paise of an rDash amount, or null when invalid / too large. */
-export function rdashPaise(value: unknown): number | null {
+/** Units of an rDash amount, or null when invalid. */
+export function rdashUnits(value: unknown): Units | null {
   const r = parseRdashAmount(value);
-  return r.ok ? r.paise : null;
+  return r.ok ? r.units : null;
 }
 
-/** Paise → rDash's decimal-string form ("29500.0000"), e.g. for mock data. */
-export function paiseToRdash(paise: number): string {
-  const whole = Math.floor(paise / 100);
-  const frac = String(paise % 100).padStart(2, "0");
-  return `${whole}.${frac}00`;
+// ── User-entered / submitted amounts ─────────────────────────
+/** User amount (string from an input, or a number): plain decimal, ≤ 20
+ *  integer digits, ≤ 4 decimals. Negative, exponent, non-numeric, 21+ digits,
+ *  5+ decimals → null (SUBMIT_LIMIT_MESSAGE). */
+export function userUnits(value: unknown): Units | null {
+  const text = typeof value === "string" ? value.trim() : typeof value === "number" ? numberText(value) : null;
+  return text === null ? null : parseDecimalText(text, MAX_SUBMIT_INT_DIGITS, MAX_DECIMALS, false);
 }
+
+/** A row's Payment Done input: "" (or whitespace) = not paying this row = 0. */
+export function rowAmountUnits(amount: unknown): Units | null {
+  if (typeof amount === "string" && amount.trim() === "") return ZERO;
+  return userUnits(amount);
+}
+
+/** Keystroke guard for money inputs: allow only text that can still become a
+ *  valid amount — digits, at most one dot, ≤ 20 integer digits, ≤ 4 decimals. */
+export function isAllowedAmountInput(text: string): boolean {
+  return new RegExp(`^\\d{0,${MAX_SUBMIT_INT_DIGITS}}(\\.\\d{0,${MAX_DECIMALS}})?$`).test(text);
+}
+
+/** Any non-negative decimal text (no digit limit) — for amounts PBE itself
+ *  produced, e.g. recorded totals returned by the bulk route. */
+export function decimalUnits(value: unknown): Units | null {
+  return typeof value === "string" ? parseDecimalText(value.trim(), null, MAX_DECIMALS, false) : null;
+}
+
+// ── Output ────────────────────────────────────────────────────
+function splitUnits(units: Units): { neg: boolean; whole: string; frac4: string } {
+  const neg = units < ZERO;
+  const abs = neg ? -units : units;
+  return { neg, whole: (abs / SCALE).toString(), frac4: (abs % SCALE).toString().padStart(MAX_DECIMALS, "0") };
+}
+
+/** Plain decimal text with no trailing zeros ("1200.5", "7", "0.0001") — for
+ *  inputs, request bodies and exact string amounts. */
+export function unitsToDecimalString(units: Units): string {
+  const { neg, whole, frac4 } = splitUnits(units);
+  const frac = frac4.replace(/0+$/, "");
+  return `${neg ? "-" : ""}${whole}${frac ? `.${frac}` : ""}`;
+}
+
+/** rDash's 4-decimal string form ("29500.0000") — e.g. mock data. */
+export function unitsToRdash(units: Units): string {
+  const { neg, whole, frac4 } = splitUnits(units);
+  return `${neg ? "-" : ""}${whole}.${frac4}`;
+}
+
+/** Indian digit grouping on a plain integer digit string (any size). */
+export function groupIndian(whole: string): string {
+  if (whole.length <= 3) return whole;
+  return `${whole.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${whole.slice(-3)}`;
+}
+
+/** Display: "1,23,456.50" — 2 decimals normally, 3–4 only when those digits
+ *  are non-zero ("12.3456"). Exact for any size, never rounded.
+ *  `wholeOnlyIfInteger`: "₹ 2,00,000" card style (no ".00"). */
+export function formatUnits(units: Units, opts?: { wholeOnlyIfInteger?: boolean }): string {
+  const { neg, whole, frac4 } = splitUnits(units);
+  let frac = frac4.slice(2) === "00" ? frac4.slice(0, 2) : frac4.replace(/0+$/, "");
+  if (opts?.wholeOnlyIfInteger && /^0+$/.test(frac4)) frac = "";
+  return `${neg ? "-" : ""}${groupIndian(whole)}${frac ? `.${frac}` : ""}`;
+}
+
+/** Number of significant digits of a units value (for exact-number checks). */
+function significantDigits(units: Units): number {
+  const digits = (units < ZERO ? -units : units).toString().replace(/0+$/, "");
+  return digits === "" ? 1 : digits.replace(/^0+/, "").length;
+}
+
+export const MAX_EXACT_NUMBER_DIGITS = 15;
+
+/** A JS number exactly equal to `units`, or null when it can't round-trip
+ *  (> 15 significant digits, or the number's text parses back differently).
+ *  Never returns a rounded value. */
+export function unitsToExactNumber(units: Units): number | null {
+  if (significantDigits(units) > MAX_EXACT_NUMBER_DIGITS) return null;
+  const text = unitsToDecimalString(units);
+  const n = Number(text);
+  const back = numberText(n);
+  if (back === null) return null;
+  return parseDecimalText(back, null, MAX_DECIMALS, false) === units ? n : null;
+}
+
+export const unitsZero = ZERO;

@@ -10,7 +10,13 @@ import { apiFetch } from "@/lib/api-fetch";
 import { useSession } from "@/lib/auth-context";
 import { validateAllocation } from "@/lib/payments/validation";
 import { computeTotals } from "@/lib/payments/totals";
-import { rowsCurrency } from "@/lib/payments/currency";
+import {
+  listCurrencies,
+  resolveSelectedCurrency,
+  rowsForCurrency,
+  rowsWithoutCurrency,
+} from "@/lib/payments/currency";
+import { CurrencyFilter } from "@/components/rd/CurrencyFilter";
 import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
 import { clearAppliedAmounts, dismissFailedRow, payInFull, setRowAmount } from "@/lib/payments/allocation";
 import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
@@ -91,6 +97,10 @@ export function NewPaymentClient() {
 
   const [header, setHeader] = useState<PaymentHeaderValue>(EMPTY_HEADER);
   const [rows, setRows] = useState<AllocationRow[]>([]);
+  // Currency filter: the user's explicit pick (code). The effective selection
+  // is derived during render (resolveSelectedCurrency): their pick if it still
+  // exists, else the only currency, else none — never guessed.
+  const [pickedCurrency, setSelectedCurrency] = useState<string | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
   // Header fields the user has edited: their inline errors show; the live
@@ -130,9 +140,18 @@ export function NewPaymentClient() {
     void loadRows();
   }, [loadRows]);
 
-  const totals = useMemo(() => computeTotals(header.amountPaid, rows), [header.amountPaid, rows]);
-  const currency = useMemo(() => rowsCurrency(rows), [rows]);
-  const validation = useMemo(() => validateAllocation(header, rows), [header, rows]);
+  // Currency rules live in lib/payments/currency.ts. Everything below the
+  // filter (table, totals, validation, submit) uses ONLY the rows of the
+  // selected currency.
+  const currencyOptions = useMemo(() => listCurrencies(rows), [rows]);
+  const selectedCurrency = resolveSelectedCurrency(currencyOptions, pickedCurrency);
+  const selectedOption = currencyOptions.find((o) => o.code === selectedCurrency) ?? null;
+  const visibleRows = useMemo(() => rowsForCurrency(rows, selectedCurrency), [rows, selectedCurrency]);
+  const noCurrencyCount = useMemo(() => rowsWithoutCurrency(rows), [rows]);
+  const needsCurrencyPick = load.status === "ready" && currencyOptions.length > 0 && !selectedOption;
+  const totals = useMemo(() => computeTotals(header.amountPaid, visibleRows), [header.amountPaid, visibleRows]);
+  const currency = useMemo(() => ({ symbol: selectedOption?.symbol || null, mixed: false }), [selectedOption]);
+  const validation = useMemo(() => validateAllocation(header, visibleRows), [header, visibleRows]);
   const current = useMemo<Sent | null>(
     () =>
       validation.ok
@@ -161,10 +180,14 @@ export function NewPaymentClient() {
     setHeader((h) => ({ ...h, [field]: value }));
     if (field === "remark") setRows((r) => applyHeaderRemark(r, value as string));
   };
+  // `index` is the row's position in the (currency-filtered) table; rows are
+  // updated by payment_request_id so filtering can never hit the wrong row.
   const updateRow = (index: number, fn: (r: AllocationRow) => AllocationRow) => {
     if (inFlightRef.current) return;
+    const id = visibleRows[index]?.config.payment_request_id;
+    if (!id) return;
     edited();
-    setRows((rs) => rs.map((r, i) => (i === index ? fn(r) : r)));
+    setRows((rs) => rs.map((r) => (r.config.payment_request_id === id ? fn(r) : r)));
   };
 
   // Refetch after every response so Payment Due is current, then merge the
@@ -219,7 +242,7 @@ export function NewPaymentClient() {
       if (res.ok && isBulkSubmitResult(body)) {
         result = body;
         fullSuccess = body.failed.length === 0;
-        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels, symbol: rowsCurrency(rows).symbol });
+        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels, symbol: selectedOption?.symbol || null });
         if (fullSuccess) {
           setResultSent(null);
           setHeader(EMPTY_HEADER);
@@ -231,7 +254,7 @@ export function NewPaymentClient() {
           setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(body, sent.request) }));
         }
       } else if (res.status === 400 && isValidationRejection(body)) {
-        setServerRowErrors(mapServerRowErrors(sent.request, body.fieldErrors, rows));
+        setServerRowErrors(mapServerRowErrors(sent.request, body.fieldErrors, visibleRows));
         setOutcome({ kind: "rejected", summary: body.summary });
       } else if (res.status === 403) {
         setOutcome({ kind: "error", message: errorText(body, "You do not have access to perform this action") });
@@ -251,7 +274,7 @@ export function NewPaymentClient() {
 
   const onSubmit = () => {
     // Re-validate at click time from the latest state (never a stale render).
-    const v = validateAllocation(header, rows);
+    const v = validateAllocation(header, visibleRows);
     if (!v.ok) return;
     void send({ request: buildSubmitRequest(header, v.value), entries: buildBulkEntries(v.value) }, "submit");
   };
@@ -270,17 +293,36 @@ export function NewPaymentClient() {
   // Amount paid follows what is still retryable.
   const onRemoveFailed = (index: number) => {
     if (inFlightRef.current) return;
-    const row = rows[index];
+    const row = visibleRows[index];
     if (!row?.rowError) return;
     const id = row.config.payment_request_id;
     edited();
-    setRows((rs) => rs.map((r, i) => (i === index ? dismissFailedRow(r) : r)));
+    setRows((rs) => rs.map((r) => (r.config.payment_request_id === id ? dismissFailedRow(r) : r)));
     setRemovedIds((s) => new Set(s).add(id));
     if (resultSent) {
       const result = removeFailedId(resultSent.result, id);
       setResultSent({ sent: resultSent.sent, result });
       setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(result, resultSent.sent.request) }));
     }
+  };
+
+  // Switching currency with amounts entered: confirm, then clear them (an
+  // amount in one currency must never count against another).
+  const onCurrencyChange = async (code: string) => {
+    if (inFlightRef.current) return;
+    if (rows.some((r) => r.amount.trim() !== "")) {
+      const ok = await confirm({
+        title: "Change currency?",
+        message: "The amounts you entered will be cleared.",
+        confirmLabel: "Change currency",
+        cancelLabel: "Keep current",
+        variant: "danger",
+      });
+      if (!ok) return;
+      setRows((r) => clearAppliedAmounts(r));
+    }
+    edited();
+    setSelectedCurrency(code);
   };
 
   const onCancel = async () => {
@@ -304,19 +346,33 @@ export function NewPaymentClient() {
 
   return (
     <>
-      <PageHeader />
+      <PageHeader
+        actions={
+          <CurrencyFilter
+            options={currencyOptions}
+            selected={selectedOption?.code ?? null}
+            onSelect={(code) => void onCurrencyChange(code)}
+            disabled={submitting !== null || load.status !== "ready"}
+          />
+        }
+      />
       <main className="flex flex-1 flex-col gap-5 p-5">
         {/* Disabled while a submit is in flight — no edits can race the response. */}
         <fieldset disabled={submitting !== null} aria-busy={submitting !== null} className="flex min-w-0 flex-col gap-5">
           <PaymentHeader value={header} errors={headerErrors} onChange={setHeaderField} />
-          <SummaryCards totals={totals} loaded={load.status === "ready"} rowCount={rows.length} currency={currency} />
+          <SummaryCards
+            totals={totals}
+            loaded={load.status === "ready" && selectedOption !== null}
+            rowCount={visibleRows.length}
+            currency={currency}
+          />
 
           <TableBox
             title={
               <>
                 Payment due
                 <span className="ml-1 font-normal text-rd-muted">
-                  · {totals.selectedCount} of {rows.length} selected
+                  · {totals.selectedCount} of {visibleRows.length} selected
                 </span>
               </>
             }
@@ -349,10 +405,11 @@ export function NewPaymentClient() {
             {load.status === "loading" && <TableSkeleton />}
             {load.status === "error" && <LoadError message={load.message} onRetry={() => void loadRows()} />}
             {load.status === "ready" && rows.length === 0 && <EmptyState />}
-            {load.status === "ready" && rows.length > 0 && (
+            {needsCurrencyPick && <EmptyState message="Select a currency to see payment requests" />}
+            {load.status === "ready" && visibleRows.length > 0 && (
               <AllocationTable
                 currencySymbol={currency.symbol}
-                rows={rows}
+                rows={visibleRows}
                 rowErrors={rowErrors}
                 onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
                 onPayInFull={(i) => updateRow(i, payInFull)}
@@ -362,7 +419,12 @@ export function NewPaymentClient() {
             )}
           </TableBox>
 
-          {load.status === "ready" && rows.length > 0 && dirty ? <ValidationList items={validation.summary} /> : null}
+          {load.status === "ready" && noCurrencyCount > 0 ? (
+            <p className="text-[12px] text-rd-pending">
+              {noCurrencyCount} request{noCurrencyCount === 1 ? " has" : "s have"} no currency from rDash and can&apos;t be shown.
+            </p>
+          ) : null}
+          {load.status === "ready" && visibleRows.length > 0 && dirty ? <ValidationList items={validation.summary} /> : null}
         </fieldset>
 
         {refreshError ? (

@@ -4,8 +4,9 @@ import { getRdashSource } from "@/lib/server/rdash-source";
 import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
 import { safeJson } from "@/lib/server/respond-safe";
 import { rdashRouteError, withCookieHeader } from "@/lib/server/route-errors";
-import { validateSubmission, fromPaise } from "@/lib/payments/validation";
-import { buildBulkEntries } from "@/lib/payments/build-payload";
+import { validateSubmission } from "@/lib/payments/validation";
+import { unitsToDecimalString, type Units } from "@/lib/payments/money";
+import { BULK_AMOUNT_AS_STRING, buildBulkEntries } from "@/lib/payments/build-payload";
 import type { BulkSubmitResult } from "@/types/payments";
 import type { BulkPaymentEntryCreateOutput } from "@/types/rdash";
 
@@ -42,7 +43,10 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
     const source = getRdashSource(auth);
 
     const freshConfig = await source.listPaymentRequestConfig(auth.vendorId);
-    const result = validateSubmission({ header: body.header, rows: body.rows }, freshConfig);
+    // Amount form (exact JSON number vs exact decimal string) is decided once
+    // here and used for both validation and the payload.
+    const bulkAmountAsString = BULK_AMOUNT_AS_STRING;
+    const result = validateSubmission({ header: body.header, rows: body.rows }, freshConfig, { bulkAmountAsString });
     if (!result.ok) {
       return withCookieHeader(
         NextResponse.json(
@@ -53,10 +57,10 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
       );
     }
 
-    const entries = buildBulkEntries(result.value);
+    const entries = buildBulkEntries(result.value, bulkAmountAsString);
     const output = await source.createBulkPaymentEntries(entries);
 
-    const amountById = new Map(result.value.rows.map((r) => [r.payment_request_id, r.amountPaise]));
+    const amountById = new Map(result.value.rows.map((r) => [r.payment_request_id, r.amountUnits]));
     const summary = summarize(output, amountById);
     if (!summary) {
       // rDash's answer doesn't account for exactly the entries we sent. Some
@@ -81,11 +85,12 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
 });
 
 // created + failed must cover every submitted id exactly once; otherwise null.
-function summarize(output: BulkPaymentEntryCreateOutput, amountById: Map<string, number>): BulkSubmitResult | null {
+// Amounts are exact units; the response carries exact decimal strings.
+function summarize(output: BulkPaymentEntryCreateOutput, amountById: Map<string, Units>): BulkSubmitResult | null {
   if (!output || !Array.isArray(output.created) || !Array.isArray(output.failed)) return null;
   const seen = new Set<string>();
-  let recorded = 0;
-  let notRecorded = 0;
+  let recorded = BigInt(0);
+  let notRecorded = BigInt(0);
   for (const [list, isCreated] of [[output.created, true], [output.failed, false]] as const) {
     for (const item of list) {
       const id = item?.payment_request_id;
@@ -101,7 +106,7 @@ function summarize(output: BulkPaymentEntryCreateOutput, amountById: Map<string,
     count: output.count,
     created: output.created,
     failed: output.failed,
-    recordedAmount: fromPaise(recorded),
-    notRecordedAmount: fromPaise(notRecorded),
+    recordedAmount: unitsToDecimalString(recorded),
+    notRecordedAmount: unitsToDecimalString(notRecorded),
   };
 }

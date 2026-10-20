@@ -28,7 +28,7 @@ export function isPayableStatus(status: unknown): status is PayableStatus {
 /** false only when payment_due is known to be ≤ 0. */
 export function hasPaymentDue(item: Pick<VendorPaymentRequestConfigItem, "payment_due">): boolean {
   const due = parseRdashAmount(item.payment_due);
-  return due.ok ? due.paise > 0 : true;
+  return due.ok ? due.units > BigInt(0) : true;
 }
 
 /** (a) payable status AND (b) payment_due > 0. */

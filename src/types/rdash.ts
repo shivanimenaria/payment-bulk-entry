@@ -123,8 +123,10 @@ export type PaymentMode = "bank_transfer" | "cheque" | "cash" | "upi";
 // POST /v2/vendor-payment-requests/payment-entries/bulk/ — ExternalBulkPaymentEntryCreateInputEntity
 export interface BulkPaymentEntryInput {
   payment_request_id: string;
-  /** number($float) — the validated amount, at most 2 decimals. */
-  amount: number;
+  /** Swagger: number($float). Sent as an exact JSON number (≤ 15 significant
+   *  digits), or as the exact decimal string when BULK_AMOUNT_AS_STRING
+   *  (lib/payments/build-payload.ts) — never a rounded number. */
+  amount: number | string;
   payment_mode: PaymentMode;
   /** "YYYY-MM-DD" (confirmed). */
   payment_date: string;
