@@ -13,7 +13,7 @@ const IS_DEV = process.env.NODE_ENV !== "production";
 // In-process dedupe: clients sometimes hammer /api/auth/me (multiple panels,
 // visibility-change races, parent-frame nudges). Cache the encoded response
 // for 2 s, real mode only. The key is cookie value + URL query, so:
-//   - a rotated cookie is a new key (never served the old body), and
+//   - a re-issued cookie is a new key (never served the old body), and
 //   - a request whose URL carries different workspace/user params (e.g. a
 //     userId that doesn't match the cookie) misses the cache and goes through
 //     getAuth's checks instead of reusing another request's 200.
@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const { auth, cookieHeader, mock, dev } = await getSessionOrMock(request);
+    const { auth, mock, dev } = await getSessionOrMock(request);
     // Internal storage form is the decoded integer-string ("498"); the browser
     // only ever sees rDash hashids. Mock IDs are not real rDash IDs, and DEV
     // static-token ids are already rDash's own, so both are returned as-is.
@@ -53,8 +53,7 @@ export async function GET(request: NextRequest) {
       authMode: dev ? "static_token" : "handover",
     };
     const response = safeJson(payload, { route: "GET /api/auth/me" });
-    if (cookieHeader) response.headers.set("Set-Cookie", cookieHeader);
-    if (!cookieHeader && cacheKey) {
+    if (cacheKey) {
       cache.set(cacheKey, JSON.stringify(payload));
     }
     return response;

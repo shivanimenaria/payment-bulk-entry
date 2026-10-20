@@ -10,6 +10,9 @@ export const BOOTSTRAP_ERROR_MESSAGES: Record<string, string> = {
   vendor_forbidden: "You do not have access to this vendor's payments.",
   org_mismatch: "This link belongs to a different organisation than your rDash session.",
   session_error: "Sign-in to this app failed.",
+  // Set by api-fetch (not /api/session): a fresh handover ended in a 401
+  // again right away — stop instead of looping.
+  session_renew_failed: "Session could not be renewed — reload the tab.",
 };
 
 // org/user/vendor/project context from the bootstrap URL (either casing).

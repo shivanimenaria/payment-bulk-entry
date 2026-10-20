@@ -5,24 +5,24 @@ import { getCookieSecretKey } from "@/lib/runtime-config";
 
 // Edge runtime — no Node-only imports.
 //
-// Middleware does NOT refresh rDash tokens anymore. Proactive refresh
-// (refreshing at <60s remaining) caused "Refresh token replay detected. All
-// tokens revoked." storms during pod restarts, because rDash rotates refresh
-// tokens single-use and the new pod re-tried with the same R1 the previous
-// pod had already consumed. Refresh now happens lazily inside `apiFetch` /
-// `paginateRdash` (Node runtime, has PG access for advisory-lock coordination
-// and a cached session row to dedupe across pods).
+// PBE never refreshes rDash tokens (no refresh token is kept): when the access
+// token expires, the iframe gets a fresh handover code from rDash.
 //
-// What middleware still does:
+// What middleware does:
 //   1. Decrypt the auth cookie so we can detect URL-vs-cookie project drift
-//      when rDash switches projects without re-handing-over.
-//   2. Maintain `lastPath` (the user's last in-app page) so iframe reloads
+//      when rDash switches projects without re-handing-over, and clear it on
+//      an org / vendor / user mismatch.
+//   2. Clear an expired session: `/api/*` gets 401 { error: "session_expired" }
+//      (the browser saves the form and re-handovers); pages pass through
+//      without the cookie.
+//   3. Maintain `lastPath` (the user's last in-app page) so iframe reloads
 //      land where they left off.
 
-// Must match COOKIE_NAME / FRESH_HEADER in src/lib/server/auth.ts (Edge
-// runtime can't import server-only modules).
+// Must match COOKIE_NAME / FRESH_HEADER / SESSION_EXPIRED in
+// src/lib/server/auth.ts (Edge runtime can't import server-only modules).
 const COOKIE_NAME = "pbe-auth";
 const FRESH_HEADER = "x-pbe-auth-fresh";
+const SESSION_EXPIRED = "session_expired";
 // Same validated key as src/lib/server/auth.ts (shared Edge-safe module).
 // Also checked at server startup in src/instrumentation.ts.
 const getSecretKey = getCookieSecretKey;
@@ -59,9 +59,7 @@ function decodeRdashIdMaybe(hash: string): string {
 
 interface AuthPayload {
   accessToken: string;
-  refreshToken: string;
   expiresAt: number;
-  refreshExpiresAt: number;
   orgId: string;
   projectId: string;
   userId: string;
@@ -139,6 +137,14 @@ function passThrough(request: NextRequest): NextResponse {
   return NextResponse.next({ request: { headers: forwardedHeaders(request) } });
 }
 
+// Expired session on an API route: answer here (the handler would only see
+// "no cookie"), so the browser knows to save the form and re-handover.
+function sessionExpiredResponse(): NextResponse {
+  const response = NextResponse.json({ error: SESSION_EXPIRED }, { status: 401 });
+  appendAuthCookie(response, "", 0);
+  return response;
+}
+
 function clearAuthCookieResponse(request: NextRequest): NextResponse {
   const response = NextResponse.next({
     request: { headers: forwardedHeaders(request, { dropAuthCookie: true }) },
@@ -169,7 +175,7 @@ export async function middleware(request: NextRequest) {
   // the iframe URL carries the new projectId but the cookie still holds the
   // old value. Whenever the URL projectId contradicts the cookie we re-issue
   // the cookie with it so every downstream caller sees the right project.
-  // The encrypted access/refresh tokens are NOT touched.
+  // The encrypted access token is NOT touched.
   // org, vendor and user are NOT synced from the URL: orgId comes only from
   // the handover, vendorId only from a server-verified handover. A URL value
   // that differs from the cookie clears the cookie, forcing a fresh handover
@@ -259,22 +265,20 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // ── 2. Refresh-token expiry guard ────────────────────────────
-  // The refresh token itself has expired (rDash issues 12h refresh tokens).
-  // Even our lazy-refresh path can't recover from this — clear the cookie
-  // so the iframe re-handovers cleanly.
-  if (payload.refreshExpiresAt <= now) {
-    console.info("[middleware/auth] refresh token expired, clearing cookie", {
+  // ── 2. Access-token expiry ───────────────────────────────────
+  // No refresh exists: an expired access token ends the session. Clear the
+  // cookie; API calls get 401 session_expired so the browser re-handovers.
+  // A missing/invalid expiresAt (older cookie shape) counts as expired.
+  if (typeof payload.expiresAt !== "number" || !Number.isFinite(payload.expiresAt) || payload.expiresAt <= now) {
+    console.info("[middleware/auth] access token expired, clearing cookie", {
+      path: request.nextUrl.pathname,
       userId: payload.userId,
-      refreshExpiresAt: payload.refreshExpiresAt,
+      expiresAt: payload.expiresAt,
       now,
     });
+    if (request.nextUrl.pathname.startsWith("/api/")) return sessionExpiredResponse();
     return clearAuthCookieResponse(request);
   }
-
-  // Access tokens are NOT refreshed here anymore. `apiFetch` / `paginateRdash`
-  // catch 401 from rDash and call `refreshAuthForRequest` (PG-locked, DB-cached)
-  // so we never replay a refresh token rDash has already rotated.
 
   // If nothing else changed, fast-path out.
   if (!projectMismatch && !lastPathChanged) return passThrough(request);
@@ -292,7 +296,7 @@ export async function middleware(request: NextRequest) {
   }
 
   const encrypted = await encrypt(nextPayload);
-  const maxAge = Math.max(0, nextPayload.refreshExpiresAt - now);
+  const maxAge = Math.max(0, nextPayload.expiresAt - now);
 
   // Mutate the inbound request so the server component sees the fresh cookie
   // value when it calls cookies()

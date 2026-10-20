@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionOrMock, withAuthCookies } from "@/lib/server/auth";
+import { getSessionOrMock } from "@/lib/server/auth";
 import { getRdashSource } from "@/lib/server/rdash-source";
 import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
 import { safeJson } from "@/lib/server/respond-safe";
-import { rdashRouteError, withCookieHeader } from "@/lib/server/route-errors";
+import { rdashRouteError } from "@/lib/server/route-errors";
 import { validateSubmission } from "@/lib/payments/validation";
 import { unitsToDecimalString, type Units } from "@/lib/payments/money";
 import { BULK_AMOUNT_AS_STRING, buildBulkEntries } from "@/lib/payments/build-payload";
@@ -22,7 +22,10 @@ const ROUTE = "POST /api/rdash/payment-entries/bulk";
 //     invalid / duplicate / unknown row → 400 with field errors; the bulk API
 //     is NOT called.
 //  3. Build entries, create in one bulk call, map created/failed to amounts.
-export const POST = withAuthCookies(async (request: NextRequest) => {
+// Session expired / rDash 401 at any step → 401 session_expired. The bulk
+// call is never retried here (or re-sent by the browser after the fresh
+// handover — the user submits again from the restored form).
+export async function POST(request: NextRequest) {
   // DEV static-token mode: writes blocked unless RDASH_DEV_ALLOW_WRITES=true.
   // Checked first — nothing is read from rDash either.
   if (resolveAuthMode(process.env) === "static_token" && !devStaticTokenConfig(process.env).allowWrites) {
@@ -39,7 +42,7 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
   }
 
   try {
-    const { auth, cookieHeader } = await getSessionOrMock(request);
+    const { auth } = await getSessionOrMock(request);
     const source = getRdashSource(auth);
 
     const freshConfig = await source.listPaymentRequestConfig(auth.vendorId);
@@ -48,12 +51,9 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
     const bulkAmountAsString = BULK_AMOUNT_AS_STRING;
     const result = validateSubmission({ header: body.header, rows: body.rows }, freshConfig, { bulkAmountAsString });
     if (!result.ok) {
-      return withCookieHeader(
-        NextResponse.json(
-          { error: "Validation failed", fieldErrors: result.errors, summary: result.summary },
-          { status: 400 },
-        ),
-        cookieHeader,
+      return NextResponse.json(
+        { error: "Validation failed", fieldErrors: result.errors, summary: result.summary },
+        { status: 400 },
       );
     }
 
@@ -70,19 +70,16 @@ export const POST = withAuthCookies(async (request: NextRequest) => {
         submitted: Array.from(amountById.keys()),
         output,
       });
-      return withCookieHeader(
-        NextResponse.json(
-          { error: "Could not confirm which payments were recorded. Check Payment Entries in rDash before retrying." },
-          { status: 502 },
-        ),
-        cookieHeader,
+      return NextResponse.json(
+        { error: "Could not confirm which payments were recorded. Check Payment Entries in rDash before retrying." },
+        { status: 502 },
       );
     }
-    return withCookieHeader(safeJson(summary, { route: ROUTE }), cookieHeader);
+    return safeJson(summary, { route: ROUTE });
   } catch (err) {
     return rdashRouteError(err, ROUTE);
   }
-});
+}
 
 // created + failed must cover every submitted id exactly once; otherwise null.
 // Amounts are exact units; the response carries exact decimal strings.

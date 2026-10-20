@@ -4,8 +4,6 @@ import {
   setAuthCookieAsync,
   readAuthCookieFromRequest,
   isSafeRestorePath,
-  clearSessionCache,
-  seedSessionCache,
   getRequestLogContext,
   type AuthPayload,
 } from "@/lib/server/auth";
@@ -174,26 +172,19 @@ export async function GET(request: NextRequest) {
         ? oldAuth.lastPath
         : undefined;
 
-    // Fresh handover = fresh session. Drop cached state for BOTH users when
-    // the iframe is changing hands, so a prior user's session row or
-    // in-flight refresh can never be served to the new user.
     if (oldAuth?.userId && oldAuth.userId !== userId) {
-      console.warn("[session] user changed across handover, clearing prior user state", {
+      console.warn("[session] user changed across handover", {
         oldUserId: oldAuth.userId,
         newUserId: userId,
       });
-      await clearSessionCache(oldAuth.userId);
-    }
-    if (userId) {
-      await clearSessionCache(userId);
     }
 
+    // Access token only — no refresh token is kept; the cookie lives until
+    // the access token expires, then the iframe re-handovers.
     const now = Math.floor(Date.now() / 1000);
     const authPayload: AuthPayload = {
       accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
       expiresAt: now + result.expiresIn,
-      refreshExpiresAt: now + result.refreshExpiresIn,
       orgId,
       projectId,
       userId,
@@ -212,17 +203,6 @@ export async function GET(request: NextRequest) {
       vendorId,
       ...(await getRequestLogContext()),
     });
-
-    // Seed `pbe_user_sessions` so the row exists immediately on handover.
-    if (userId) {
-      await seedSessionCache({
-        userId,
-        accessToken: result.accessToken,
-        refreshToken: result.refreshToken,
-        expiresAt: authPayload.expiresAt,
-        refreshExpiresAt: authPayload.refreshExpiresAt,
-      });
-    }
 
     sessionCache.set(cacheKey, redirectUrl);
     setTimeout(() => sessionCache.delete(cacheKey), 5 * 60 * 1000);

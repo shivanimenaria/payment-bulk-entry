@@ -13,22 +13,16 @@ import { GET as sessionGET } from "@/app/api/session/route";
 import { GET as meGET } from "@/app/api/auth/me/route";
 import { middleware } from "@/middleware";
 
-// The handover consume and the session-cache DB writes are stubbed; everything
-// else in /api/session (decode, org check, vendor verification, cookie) is real.
-const { consumeHandoverCode, seedSessionCache, clearSessionCache, refreshAuthForRequest } = vi.hoisted(() => ({
+// The handover consume is stubbed; everything else in /api/session (decode,
+// org check, vendor verification, cookie) is real.
+const { consumeHandoverCode } = vi.hoisted(() => ({
   consumeHandoverCode: vi.fn(),
-  seedSessionCache: vi.fn(async () => {}),
-  clearSessionCache: vi.fn(async () => {}),
-  refreshAuthForRequest: vi.fn(),
 }));
 vi.mock("@/lib/server/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/server/auth")>();
   return {
     ...actual,
     consumeHandoverCode: (code: string) => consumeHandoverCode(code),
-    seedSessionCache: (...a: unknown[]) => seedSessionCache(...(a as [])),
-    clearSessionCache: (...a: unknown[]) => clearSessionCache(...(a as [])),
-    refreshAuthForRequest: () => refreshAuthForRequest(),
     getRequestLogContext: async () => ({}),
     getOutboundContextHeaders: async () => ({}),
   };
@@ -45,9 +39,7 @@ const nextCode = () => `code-${++codeSeq}`;
 function handoverResult(orgId: number, tabCode: string | null = "pbe") {
   return {
     accessToken: "new-access",
-    refreshToken: "new-refresh",
     expiresIn: 900,
-    refreshExpiresIn: 3600,
     user: { id: enc(7), display_name: "Test User", email: "t@example.com" },
     org: { id: enc(orgId), name: "Org", type: "x" },
     tabCode,
@@ -98,9 +90,6 @@ beforeAll(() => {
 beforeEach(() => {
   process.env.RDASH_DATA_SOURCE = "real";
   consumeHandoverCode.mockReset();
-  seedSessionCache.mockClear();
-  clearSessionCache.mockClear();
-  refreshAuthForRequest.mockReset();
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -172,15 +161,19 @@ describe("/api/session: vendor + org verification", () => {
     const cookie = pbeCookie(res)!;
     expect(cookie).toBeTruthy();
     const payload = await decryptCookie(cookie);
-    expect(payload).toMatchObject({ vendorId: "33", orgId: "11", projectId: "22", userId: "7" });
-    expect(seedSessionCache).toHaveBeenCalledTimes(1);
+    expect(payload).toMatchObject({ vendorId: "33", orgId: "11", projectId: "22", userId: "7", accessToken: "new-access" });
+    // Access token only: no refresh token kept; cookie lives until it expires.
+    expect(payload).not.toHaveProperty("refreshToken");
+    expect(payload).not.toHaveProperty("refreshExpiresAt");
+    const maxAge = Number(/Max-Age=(\d+)/.exec(res.headers.get("set-cookie") || "")?.[1]);
+    expect(maxAge).toBeGreaterThan(895);
+    expect(maxAge).toBeLessThanOrEqual(900);
 
     const me = await meGET(new NextRequest(`${APP}/api/auth/me`, { headers: { cookie: `pbe-auth=${cookie}` } }));
     expect(me.status).toBe(200);
     const body = await me.json();
     expect(body.vendorId).toBe(enc(33));
     expect(JSON.stringify(body)).not.toContain("new-access");
-    expect(JSON.stringify(body)).not.toContain("new-refresh");
   });
 
   it("org_id absent from the URL: orgId taken from the handover", async () => {
@@ -197,13 +190,12 @@ describe("/api/session: vendor + org verification", () => {
     expect(consumeHandoverCode).not.toHaveBeenCalled();
   });
 
-  it("vendor not in org → error=vendor_not_found, no cookie, no session seeded", async () => {
+  it("vendor not in org → error=vendor_not_found, no cookie", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(vendorsResponse([5, 6]));
     const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33), org_id: enc(11) }));
     expect(res.headers.get("location")).toBe(`${APP}/embedded/bootstrap?error=vendor_not_found`);
     expect(res.headers.get("set-cookie")).toBeNull();
-    expect(seedSessionCache).not.toHaveBeenCalled();
   });
 
   it("undecodable vendor_id → error=vendor_not_found before consuming", async () => {
@@ -220,7 +212,7 @@ describe("/api/session: vendor + org verification", () => {
     expect(res.headers.get("set-cookie")).toBeNull();
   });
 
-  it("rDash 401 on /v2/vendors → session_error, never refreshes the previous cookie's session", async () => {
+  it("rDash 401 on /v2/vendors → session_error, no refresh, no retry", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(vendorsResponse([], 401));
     const oldCookie = await makeSessionCookie({ userId: "8" });
@@ -228,7 +220,6 @@ describe("/api/session: vendor + org verification", () => {
       sessionReq({ handover: nextCode(), vendor_id: enc(33) }, `pbe-auth=${oldCookie}`),
     );
     expect(res.headers.get("location")).toBe(`${APP}/embedded/bootstrap?error=session_error`);
-    expect(refreshAuthForRequest).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.headers.get("set-cookie")).toBeNull();
   });

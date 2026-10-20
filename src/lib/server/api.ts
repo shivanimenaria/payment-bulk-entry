@@ -1,12 +1,12 @@
 import "server-only";
 import { decodeRdashIdSafe } from "./rdash-id";
-import { refreshAuthForRequest, AuthError, getRequestLogContext, getOutboundContextHeaders } from "./auth";
+import { SessionExpiredError, getRequestLogContext, getOutboundContextHeaders } from "./auth";
 import { requireEnv } from "./env";
 import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
 import type { ApiResponse, RdashVendor } from "@/types/rdash";
 
-/** DEV static-token mode: rDash rejected the static token (401). Never
- *  refreshed — the dev token must be replaced. */
+/** DEV static-token mode: rDash rejected the static token (401). There is
+ *  no handover in this mode — the dev token must be replaced. */
 export class DevTokenInvalidError extends Error {
   constructor() {
     super("dev token invalid");
@@ -23,11 +23,18 @@ export function rdashAuthHeader(token: string): string {
   return `Bearer ${token}`;
 }
 
-/** 401 in DEV static-token mode: no refresh (there is no session to refresh). */
-function failIfStaticToken401(where: string, path: string): void {
-  if (!isStaticTokenMode()) return;
-  console.warn(`[${where}] rDash 401 in dev static-token mode — not refreshing (dev token invalid)`, { path });
-  throw new DevTokenInvalidError();
+/** rDash answered 401. Never refreshed, never retried with another token:
+ *  DEV static-token mode → DevTokenInvalidError; otherwise the session is over
+ *  → SessionExpiredError (route → 401 session_expired, cookie cleared, the
+ *  browser re-handovers). */
+async function failOn401(where: string, path: string, res: Response): Promise<never> {
+  if (isStaticTokenMode()) {
+    console.warn(`[${where}] rDash 401 in dev static-token mode (dev token invalid)`, { path });
+    throw new DevTokenInvalidError();
+  }
+  const peek = await res.clone().text().catch(() => "");
+  console.warn(`[${where}] rDash 401 — session expired, re-handover required`, path, peek.slice(0, 200), await getRequestLogContext());
+  throw new SessionExpiredError(`rDash 401 on ${path}`);
 }
 
 /** An rDash `id` that isn't a hashid decodable with the PBE salt. */
@@ -85,31 +92,6 @@ export class RdashPermissionError extends Error {
   }
 }
 
-// Diagnostic-only. Decodes the JWT we sent so the 403 log shows what
-// claims rDash saw — pinpoints whether 403s are caused by a token missing
-// admin/role claims (rDash side issue) vs the user genuinely lacking
-// access. NO signature check; never use this for authorization decisions.
-function peekTokenClaimsSummary(authHeader: string | undefined): Record<string, unknown> | null {
-  if (!authHeader) return null;
-  const m = /^Bearer\s+(.+)$/i.exec(authHeader);
-  if (!m) return null;
-  try {
-    const parts = m[1].split(".");
-    if (parts.length !== 3) return null;
-    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-    const json = Buffer.from(padded, "base64").toString("utf8");
-    const claims = JSON.parse(json) as Record<string, unknown>;
-    return {
-      sub: claims.sub ?? claims.user_id ?? null,
-      is_admin: claims.is_admin ?? null,
-      roles: claims.roles ?? null,
-      permCount: Array.isArray(claims.permissions) ? (claims.permissions as unknown[]).length : null,
-      exp: claims.exp ?? null,
-    };
-  } catch { return null; }
-}
-
 /** Inspect an rDash response and throw `RdashPermissionError` on 403. */
 export async function assertRdashOk(res: Response, path?: string): Promise<void> {
   if (res.ok) return;
@@ -120,88 +102,7 @@ export async function assertRdashOk(res: Response, path?: string): Promise<void>
   }
 }
 
-// Export so rdashFetchWithRetry can attach token-claim diagnostics to its
-// 403 log without each caller having to import the JWT peek separately.
-export { peekTokenClaimsSummary };
-
-
-// Direct-fetch helper for routes that build their own rDash requests (POST
-// bodies, PUT bodies, custom Content-Type, etc.). Wraps `fetch` with the same
-// lazy refresh-on-401 retry that `apiFetch` provides. Returns the final
-// Response plus the (possibly rotated) access token so the caller can thread
-// it into subsequent rDash calls in the same handler — that way only the
-// first call pays the advisory-lock + cache-read cost; the rest reuse the
-// fresh token in memory.
-//
-// Usage:
-//   let token = auth.accessToken;
-//   const { res: r1, accessToken: t1 } = await rdashFetchWithRetry(url1, token);
-//   token = t1;
-//   const { res: r2 } = await rdashFetchWithRetry(url2, token, { method: "PUT", body });
-export async function rdashFetchWithRetry(
-  url: string,
-  accessToken: string,
-  init?: RequestInit,
-  opts?: { silent403?: boolean }
-): Promise<{ res: Response; accessToken: string }> {
-  // Snapshot the browser context once per call. The retry below reuses the
-  // same snapshot so both attempts correlate on the rdash-api side.
-  const ctxHeaders = await getOutboundContextHeaders();
-  const build = (t: string): RequestInit => ({
-    ...init,
-    headers: {
-      Authorization: rdashAuthHeader(t),
-      ...ctxHeaders,
-      ...(init?.headers || {}),
-    },
-  });
-  let res = await fetch(url, build(accessToken));
-  if (res.status === 401) {
-    failIfStaticToken401("rdashFetchWithRetry", url);
-    const peek = await res.clone().text().catch(() => "");
-    console.warn(
-      "[rdashFetchWithRetry] 401 — attempting token refresh:",
-      url,
-      peek.slice(0, 200),
-      await getRequestLogContext(),
-    );
-    const outcome = await refreshAuthForRequest();
-    if (outcome.kind === "ok") {
-      accessToken = outcome.payload.accessToken;
-      res = await fetch(url, build(accessToken));
-      // Retry also 401'd — session is dead on rDash's side.
-      if (res.status === 401) {
-        throw new AuthError("Session expired");
-      }
-    } else {
-      // Any non-OK outcome (`revoked`, `transient`, `no_cookie`) on an
-      // already-401'd call = the user is stuck. Surface AuthError → route
-      // returns 401 → client-side apiFetch redirects to bootstrap?force=1
-      // for a fresh handover. Treating `transient` as recoverable here
-      // would just leave the user looping on the same 401 indefinitely.
-      throw new AuthError("Session expired");
-    }
-  }
-  // Diagnostic: when rDash 403s, log what claims the token we sent actually
-  // carried. Pairs with [auth/refresh] and [auth] consume claim logs to
-  // pinpoint whether intermittent admin-user 403s come from a token rDash
-  // issued without admin claims. Best-effort, no signature check.
-  // Per-call 403 diagnostic. Callers that fan out (e.g. element-detail
-  // batches with 400+ requests) can pass silent403 to suppress this and
-  // aggregate themselves — without that, a single bad token spams the log
-  // with hundreds of identical token-claim dumps.
-  if (res.status === 403 && !opts?.silent403) {
-    console.error(
-      "[rDash 403 — token claims]",
-      url,
-      { tokenClaims: peekTokenClaimsSummary(`Bearer ${accessToken}`) },
-      await getRequestLogContext(),
-    );
-  }
-  return { res, accessToken };
-}
-
-// One rDash request. Wrapped by `apiFetch` below which adds 401-refresh-retry.
+// One rDash request. Wrapped by `apiFetch` below.
 async function rdashFetchOnce(path: string, token: string, options?: RequestInit): Promise<Response> {
   return fetch(`${requireEnv("RDASH_API_URL")}${path}`, {
     ...options,
@@ -214,40 +115,12 @@ async function rdashFetchOnce(path: string, token: string, options?: RequestInit
   });
 }
 
-// Generic fetch with auth + lazy token refresh on 401.
-//
-// rDash issues 15-min access tokens. We never refresh proactively — that
-// caused "Refresh token replay detected" storms during pod restarts when two
-// flows tried to rotate the same R1. Instead: call rDash with the cookie's
-// token, and only if rDash returns 401 ("Token has been revoked." or simple
-// expired-access), call `refreshAuthForRequest` (which uses a Postgres
-// advisory lock + cached session row to serialize) and retry the call once
-// with the fresh access token. The cookie is updated as a side-effect.
+// Generic fetch with auth. A 401 is final (failOn401): the call is never
+// retried — not even a POST — and the browser gets a fresh handover.
 export async function apiFetch<T>(path: string, token: string, options?: RequestInit): Promise<T> {
-  let res = await rdashFetchOnce(path, token, options);
+  const res = await rdashFetchOnce(path, token, options);
 
-  if (res.status === 401) {
-    failIfStaticToken401("apiFetch", path);
-    const peek = await res.clone().text().catch(() => "");
-    console.warn(
-      "[apiFetch] 401 — attempting token refresh:",
-      path,
-      peek.slice(0, 200),
-      await getRequestLogContext(),
-    );
-    const outcome = await refreshAuthForRequest();
-    if (outcome.kind === "ok") {
-      res = await rdashFetchOnce(path, outcome.payload.accessToken, options);
-      if (res.status === 401) {
-        throw new AuthError("Session expired");
-      }
-    } else {
-      // Refresh failed (revoked / transient / no_cookie). Any of these on an
-      // already-401'd call means the user can't continue — escalate so the
-      // client's apiFetch re-handovers instead of looping on 401s.
-      throw new AuthError("Session expired");
-    }
-  }
+  if (res.status === 401) await failOn401("apiFetch", path, res);
 
   if (!res.ok) {
     if (res.status === 403) {
@@ -278,15 +151,8 @@ export async function apiFetch<T>(path: string, token: string, options?: Request
 //
 // DRF-paginated endpoints (`{ count, next, previous, results }`, e.g. the
 // payment-request config) use paginateRdashDrf below instead.
-// `opts.noRefresh`: on 401, throw AuthError instead of refreshing. Required
-// when `token` is NOT the request cookie's token (e.g. /api/session verifying
-// a just-issued handover token): refreshAuthForRequest refreshes whatever
-// session the request cookie holds, which there is the PREVIOUS session.
-export async function paginateRdash<T>(
-  path: string,
-  token: string,
-  opts?: { noRefresh?: boolean },
-): Promise<T[]> {
+// 401 on any page → SessionExpiredError (failOn401); never refreshed.
+export async function paginateRdash<T>(path: string, token: string): Promise<T[]> {
   const PAGE = 200;
   // Hard cap on requests per call. Reaching it without a normal stop throws
   // RdashResponseShapeError — never a silently truncated list.
@@ -299,40 +165,11 @@ export async function paginateRdash<T>(
   // Snapshot once — all page fetches in this paginated call share the same
   // browser-context headers (one user, one referer, one device).
   const ctxHeaders = await getOutboundContextHeaders();
-  // Same lazy-refresh semantics as `apiFetch`: never refresh proactively,
-  // only retry once with a freshly-rotated token if rDash returns 401.
-  // `currentToken` may be replaced after a successful refresh and is used
-  // for all subsequent pages in the loop.
-  let currentToken = token;
   for (let i = 0; i < MAX_PAGES; i++) {
     const url = `${requireEnv("RDASH_API_URL")}${path}${sep}limit=${PAGE}&offset=${offset}`;
-    let res = await fetch(url, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
+    const res = await fetch(url, { headers: { Authorization: rdashAuthHeader(token), ...ctxHeaders } });
 
-    if (res.status === 401) failIfStaticToken401("paginateRdash", path);
-    if (res.status === 401 && opts?.noRefresh) {
-      console.warn("[paginateRdash] 401 with refresh disabled", { path });
-      throw new AuthError("Session expired");
-    }
-    if (res.status === 401) {
-      const peek = await res.clone().text().catch(() => "");
-      console.warn(
-        "[paginateRdash] 401 — attempting token refresh:",
-        path,
-        peek.slice(0, 200),
-        await getRequestLogContext(),
-      );
-      const outcome = await refreshAuthForRequest();
-      if (outcome.kind === "ok") {
-        currentToken = outcome.payload.accessToken;
-        res = await fetch(url, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
-        if (res.status === 401) {
-          throw new AuthError("Session expired");
-        }
-      } else {
-        // revoked / transient / no_cookie — escalate so the client re-handovers.
-        throw new AuthError("Session expired");
-      }
-    }
+    if (res.status === 401) await failOn401("paginateRdash", path, res);
 
     if (!res.ok) {
       if (res.status === 403) {
@@ -350,7 +187,7 @@ export async function paginateRdash<T>(
     // the config, confirmed from real responses): hand the already-fetched
     // first page to the DRF paginator (follow `next`, total = count, strict).
     if (i === 0 && isDrfPage(root)) {
-      return drfFollow<T>(path, url, json, currentToken, opts);
+      return drfFollow<T>(path, url, json, token);
     }
     // Legacy envelopes `{ data: [...] }` / `{ data: { data: [...] } }`
     // (TODO(verify), docs/api-notes.md → #2). Anything else throws — never [].
@@ -414,12 +251,12 @@ export async function paginateRdash<T>(
 //     (the user's token is never sent anywhere else)
 //   - an empty page while `next` is still set, or the page cap reached
 //   - total collected ≠ `count` when `next` becomes null
-// 401: refresh-once like apiFetch (never in dev static-token mode; never with
-// opts.noRefresh). 403 → RdashPermissionError.
-export async function paginateRdashDrf<T>(path: string, token: string, opts?: { noRefresh?: boolean }): Promise<T[]> {
+// 401 → SessionExpiredError (failOn401), never refreshed. 403 →
+// RdashPermissionError.
+export async function paginateRdashDrf<T>(path: string, token: string): Promise<T[]> {
   const base = requireEnv("RDASH_API_URL");
   const sep = path.includes("?") ? "&" : "?";
-  return drfFollow<T>(path, `${base}${path}${sep}limit=${DRF_PAGE}&offset=0`, null, token, opts);
+  return drfFollow<T>(path, `${base}${path}${sep}limit=${DRF_PAGE}&offset=0`, null, token);
 }
 
 const DRF_PAGE = 200;
@@ -443,12 +280,10 @@ async function drfFollow<T>(
   firstUrl: string,
   prefetched: unknown,
   token: string,
-  opts?: { noRefresh?: boolean },
 ): Promise<T[]> {
   const MAX_PAGES = 200;
   const first = new URL(firstUrl);
   const ctxHeaders = await getOutboundContextHeaders();
-  let currentToken = token;
   let count: number | null = null;
   const out: T[] = [];
   let url: string | null = first.toString();
@@ -500,17 +335,8 @@ async function drfFollow<T>(
   return out;
 
   async function fetchDrfPage(pageUrl: string): Promise<{ success?: unknown; data?: unknown } | null> {
-    let res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
-    if (res.status === 401) {
-      failIfStaticToken401("paginateRdashDrf", path);
-      if (opts?.noRefresh) throw new AuthError("Session expired");
-      console.warn("[paginateRdashDrf] 401 — attempting token refresh:", path, await getRequestLogContext());
-      const outcome = await refreshAuthForRequest();
-      if (outcome.kind !== "ok") throw new AuthError("Session expired");
-      currentToken = outcome.payload.accessToken;
-      res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(currentToken), ...ctxHeaders } });
-      if (res.status === 401) throw new AuthError("Session expired");
-    }
+    const res = await fetch(pageUrl, { headers: { Authorization: rdashAuthHeader(token), ...ctxHeaders } });
+    if (res.status === 401) await failOn401("paginateRdashDrf", path, res);
     if (!res.ok) {
       if (res.status === 403) {
         const body = await res.clone().text().catch(() => "");
@@ -557,13 +383,11 @@ export class VendorNotFoundError extends Error {
 // TODO(verify): /v2/vendors is scoped to the token's org, returns PBE-salt
 // hashid ids, and the required permission (docs/api-notes.md → "/v2/vendors"). `vendorId` is the decoded
 // integer-string. 403 → RdashPermissionError (from paginateRdash), never
-// "not found". Used by /api/session with the just-issued handover token, so
-// the cookie-based refresh path is disabled.
+// "not found". Used by /api/session with the just-issued handover token; a
+// 401 there is a session error (no refresh exists).
 export async function assertVendorInOrg(token: string, vendorId: string): Promise<RdashVendor> {
   if (!vendorId) throw new VendorNotFoundError(vendorId);
-  const rows = decodeIdFields(
-    await paginateRdash<RdashVendor>(`/v2/vendors`, token, { noRefresh: true }),
-  );
+  const rows = decodeIdFields(await paginateRdash<RdashVendor>(`/v2/vendors`, token));
   const vendor = rows.find((v) => String(v.id) === vendorId);
   if (!vendor) throw new VendorNotFoundError(vendorId);
   return { id: String(vendor.id), name: vendor.name, code: vendor.code };

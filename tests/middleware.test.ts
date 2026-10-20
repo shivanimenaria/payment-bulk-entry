@@ -73,11 +73,36 @@ describe("middleware: rejected cookies are not forwarded", () => {
     expect(forwarded(res)!.has("cookie")).toBe(false);
   });
 
-  it("expired refresh token: cookie cleared and not forwarded", async () => {
-    const cookie = await makeSessionCookie({ refreshExpiresAt: Math.floor(Date.now() / 1000) - 1 });
+  it("expired access token on a page: cookie cleared and not forwarded", async () => {
+    const cookie = await makeSessionCookie({ expiresAt: Math.floor(Date.now() / 1000) - 1 });
     const res = await middleware(req("/payments", { cookie: `pbe-auth=${cookie}` }));
     expect(res.headers.get("set-cookie")).toMatch(/Max-Age=0/);
     expect(forwarded(res)!.has("cookie")).toBe(false);
+  });
+
+  it("expired access token on an API route: 401 session_expired + cookie cleared, handler not reached", async () => {
+    const cookie = await makeSessionCookie({ expiresAt: Math.floor(Date.now() / 1000) - 1 });
+    const res = await middleware(req("/api/rdash/payment-requests", { cookie: `pbe-auth=${cookie}` }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "session_expired" });
+    expect(res.headers.get("set-cookie")).toMatch(/pbe-auth=; Path=\/; Max-Age=0/);
+    expect(forwarded(res)).toBeNull();
+  });
+
+  it("cookie without expiresAt (old shape) counts as expired", async () => {
+    const cookie = await makeSessionCookie({ expiresAt: undefined });
+    const res = await middleware(req("/api/auth/me", { cookie: `pbe-auth=${cookie}` }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "session_expired" });
+  });
+
+  it("re-issued cookie (project sync) lives until the access token expires", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const cookie = await makeSessionCookie({ expiresAt: exp, projectId: "22" });
+    const res = await middleware(req("/payments?projectId=23", { cookie: `pbe-auth=${cookie}` }));
+    const maxAge = Number(/Max-Age=(\d+)/.exec(res.headers.get("set-cookie") || "")?.[1]);
+    expect(maxAge).toBeGreaterThan(595);
+    expect(maxAge).toBeLessThanOrEqual(600);
   });
 });
 

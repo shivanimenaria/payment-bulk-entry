@@ -9,9 +9,9 @@ Reference implementation for embedding/auth: the **RFQ app** at `/Users/shivanim
 
 ## Tech Stack
 - **Framework**: Next.js 14.2.35 (App Router) + TypeScript 5, React 18, Node 20
-- **DB**: PostgreSQL via `pg` — only for the rDash session/refresh cache (no business data)
+- **DB**: none — no database, no Redis. All payment data lives in rDash; the session is only the encrypted cookie
 - **UI**: Tailwind v3 + shadcn/ui (Radix), lucide-react, Gilroy font
-- **Auth**: rDash embedded handover (one-time code → JWT access/refresh, encrypted session cookie) via `jose`
+- **Auth**: rDash embedded handover (one-time code → access token in an encrypted session cookie) via `jose`. **No token refresh** — on expiry the iframe re-handovers
 - **IDs**: `hashids` (rDash per-app salt)
 - **Tests**: vitest (`tests/`)
 - **Deploy**: Docker (standalone Next.js) → Azure ACR → AKS via GitHub Actions
@@ -101,7 +101,7 @@ Fix-before-submitting list · Result panel · Payload preview (mock)
 - **Partial failure**: show "₹X recorded, ₹Y NOT recorded"; failed rows keep their amounts and remarks; **Retry failed** resends ONLY failed entries; Amount Paid becomes the not-recorded amount.
 - **Remove** (on a failed row): `dismissFailedRow` clears its amount + `rowError` and unlocks it (remark kept); `removeFailedId` drops it from the stored retry state so Retry failed never sends it; Amount Paid becomes what is still retryable (`retryAmountPaid`, `""` when nothing is left). The result panel keeps the reported amounts and marks the row "Removed".
 - Table refetches after every submit (and after a network error — the submit may have reached rDash). `lib/payments/submit.ts` `mergeRowsAfterSubmit`: created rows → amount cleared; failed rows → keep amount + remark, `rowError`, locked; other rows keep their edits. Full success also resets the header.
-- Submit responses: 200 → result panel; 400 → `fieldErrors.rows` mapped back to table rows (`mapServerRowErrors`), "Nothing was recorded"; 403 → permission message; 401 → `apiFetch` re-handover; 502 / network error / unexpected body → "Could not confirm whether the payments were recorded…" (never shown as success or as "not recorded").
+- Submit responses: 200 → result panel; 400 → `fieldErrors.rows` mapped back to table rows (`mapServerRowErrors`), "Nothing was recorded"; 403 → permission message; 401 → `apiFetch` saves the form and re-handovers (the submit is never re-sent automatically — see "Session expiry"); 502 / network error / unexpected body → "Could not confirm whether the payments were recorded…" (never shown as success or as "not recorded").
 - **Not in PBE**: vendor selector, per-row payment date, paid-through account, drafts, refunds, vendor advance/excess, transaction proof upload (v1 → `transaction_proof_*` = `null`).
 
 ## Embedding & Session (handover-only)
@@ -112,10 +112,10 @@ Same pattern as RFQ, plus vendor.
 3. Bootstrap redirects to `/api/session?handover=<code>&next=…&vendor_id=…&org_id=…` (built by `lib/embedded-bootstrap-url.ts`).
 4. `/api/session`:
    - Missing `vendor_id` → `error=missing_vendor` (checked **before** consuming the code).
-   - Consumes the code via `POST /api/v1/auth/embedded/handover/consume/` (JWT client_assertion). Missing `expires_in` / `refresh_token_expires_in` → `AuthError` → `session_error` (never defaulted).
+   - Consumes the code via `POST /api/v1/auth/embedded/handover/consume/` (JWT client_assertion). Missing `expires_in` → `AuthError` → `session_error` (never defaulted). The refresh token in the response is ignored.
    - Real mode: `app_slug` must equal `RDASH_PBE_TAB_CODE`; missing or different → `error=session_error`. Mock mode skips this check.
    - `orgId` comes **only** from the handover response (`org.id`). A URL `org_id` that differs → `error=org_mismatch`.
-   - Verifies the vendor with the **new** token via `assertVendorInOrg()` (`/v2/vendors`, `noRefresh`). Not found / undecodable → `error=vendor_not_found`; rDash 403 → `error=vendor_forbidden`.
+   - Verifies the vendor with the **new** token via `assertVendorInOrg()` (`/v2/vendors`; a 401 there → `session_error`). Not found / undecodable → `error=vendor_not_found`; rDash 403 → `error=vendor_forbidden`.
    - On success sets the encrypted cookie (`pbe-auth`) and redirects to `/payments?orgId=…&projectId=…&userId=…&vendorId=…`.
    - No cookie is set on any error. Error redirects carry only a fixed code; details go to the server log.
    - Error redirects are cached 5 min per handover code so a replayed URL can't re-consume it; generic `session_error` is not cached.
@@ -123,13 +123,20 @@ Same pattern as RFQ, plus vendor.
 6. Bootstrap's `/api/auth/me` probe sends the URL org/user/vendor/project context, so middleware can detect a cookie for a different vendor/org/user.
 7. `force=1` recovery (api-fetch 401): bootstrap reads the vendor from `next` (`vendorId`) as well as the URL; no vendor → `missing_vendor`, never a fallback to the cookie's vendor.
 
-Handover returns: `access_token` (~15 min), `refresh_token` (~12 h), `user {id, display_name, email}`, `org {id, name, type}`, `app_slug`. It does **not** return vendor or project — `vendor_id` comes from the iframe URL and is verified server-side against `/v2/vendors`.
+Handover returns: `access_token` (~15 min — **TBD**, see Open Items), `refresh_token` (ignored — PBE never refreshes), `user {id, display_name, email}`, `org {id, name, type}`, `app_slug`. It does **not** return vendor or project — `vendor_id` comes from the iframe URL and is verified server-side against `/v2/vendors`.
 
-Session cookie payload: `accessToken`, `refreshToken`, `expiresAt`, `refreshExpiresAt`, `orgId`, `projectId` (optional), `userId`, `vendorId`, `displayName`, `email` (`null` when rDash omits it), `tabCode` (`app_slug`; `null` only in mock mode), `lastPath`.
+Session cookie payload: `accessToken`, `expiresAt` (access-token expiry), `orgId`, `projectId` (optional), `userId`, `vendorId`, `displayName`, `email` (`null` when rDash omits it), `tabCode` (`app_slug`; `null` only in mock mode), `lastPath`.
 
-Refresh: lazy — on rDash 401, refresh once via `/api/v1/auth/token/` and retry. Concurrent refreshes are serialized (in-process single-flight + Postgres advisory lock + `pbe_user_sessions` cache) because rDash refresh tokens are single-use and a replay revokes the session. `paginateRdash(..., { noRefresh: true })` is used when the token is not the request cookie's token (e.g. vendor verification in `/api/session`), so a 401 there never refreshes the previous session. A refresh response without `refresh_token`, `expires_in` or `refresh_token_expires_in` → `AuthError` + cookie cleared (the old refresh token is never reused; lifetimes are never defaulted).
+### Session expiry — re-handover, no refresh, no DB
+rDash refresh tokens are single-use and concurrent refreshes revoke the session ("replay"), which used to need Postgres + advisory locks. PBE therefore **never refreshes**: no refresh token is stored, `/api/v1/auth/token/` is never called, and there is no database or Redis. When the access token expires, the iframe gets a fresh handover code from rDash (the parent page is still logged in) and logs in again.
+- **Server**: an expired cookie access token (`expiresAt` ≤ now, or missing) **or** an rDash 401 on any call → `SessionExpiredError` → `401 { "error": "session_expired" }` + cookie cleared (`authErrorResponse`). The rDash call is never retried with another token. Middleware clears an expired cookie: on `/api/*` it answers `401 session_expired` itself; pages pass through without the cookie. Other auth failures keep `{ "error": "Not authenticated" }`.
+- **Browser** (`lib/api-fetch.ts`): on 401, run the `onBeforeRehandover` hooks (`/payments/new` saves its unsaved form — header, selected currency, row amounts + remarks keyed by `payment_request_id` — to sessionStorage via `lib/payments/draft.ts`, scoped to vendor + currency), then navigate to `/embedded/bootstrap?force=1&next=<current path>`. Bootstrap does the normal handshake (`rdash_iframe_ready` → `rdash_handover` → `/api/session`) and returns to `next`.
+- **Restore**: `/payments/new` restores the draft once after the rows load, only for the same vendor and only into rows that still exist, then deletes it; a successful submit also clears it.
+- **Loop guard**: a sessionStorage marker is set when a re-handover starts and cleared by the next successful API call. A 401 within 60 s while it is set → `/embedded/bootstrap?error=session_renew_failed` ("Session could not be renewed — reload the tab.") instead of another handover.
+- **Submit safety**: a bulk submit is **never** re-sent automatically. If the submit got `session_expired`, the user sees the restored form and presses Submit again (if rDash recorded it before the 401, the fresh config reload shows it as paid).
+- Mock mode and DEV static-token mode are unchanged (no handover / no cookie).
 
-Cookie: `HttpOnly; Secure; SameSite=None`, emitted both Partitioned and unpartitioned (CHIPS), same as RFQ; dev (`http://localhost`) uses a single `SameSite=Lax` cookie. The lazy-refresh path never uses `cookies().set()` (Next keeps one cookie per name and collapses dual-emits): it queues the rotated cookie and **`withAuthCookies(handler)`** writes the pair onto the route's response. Every route that can refresh (calls `apiFetch` / `paginateRdash` / `rdashFetchWithRetry` / `refreshAuthForRequest`) **must** be wrapped — enforced by `tests/auth-cookie-sink-coverage.test.ts`.
+Cookie: `HttpOnly; Secure; SameSite=None`, emitted both Partitioned and unpartitioned (CHIPS), same as RFQ; dev (`http://localhost`) uses a single `SameSite=Lax` cookie. `Max-Age` = until the access token expires. Cookies are always written as raw `Set-Cookie` headers on the response (never `cookies().set()`, which collapses the dual-emit).
 
 All rDash calls use the **logged-in user's** token → payments are attributed to that user and rDash `CAN_*` permissions apply.
 
@@ -163,22 +170,20 @@ pbe2/
 │   │           └── payment-entries/bulk/
 │   ├── components/{ui,embedded}/
 │   ├── lib/
-│   │   ├── payments/                   # money.ts, validation.ts, totals.ts, remarks.ts, allocation.ts, build-payload.ts, retry.ts, submit.ts (pure, shared client+server)
+│   │   ├── payments/                   # money.ts, validation.ts, totals.ts, remarks.ts, allocation.ts, build-payload.ts, retry.ts, submit.ts, draft.ts (pure, shared client+server)
 │   │   ├── server/                     # `import "server-only"`
-│   │   │   ├── api.ts                  # apiFetch, paginateRdash (noRefresh), retry, assertVendorInOrg; errors: RdashPermissionError, VendorNotFoundError, RdashUpstreamError, RdashResponseShapeError, RdashIdDecodeError
-│   │   │   ├── auth.ts                 # Handover, JWT cookie, refresh, getAuth, withAuthCookies (AuthPayload incl. vendorId)
-│   │   │   ├── db.ts                   # PG pool, query, transactions
+│   │   │   ├── api.ts                  # apiFetch, paginateRdash(Drf) (401 → SessionExpiredError, no retry), assertVendorInOrg; errors: RdashPermissionError, VendorNotFoundError, RdashUpstreamError, RdashResponseShapeError, RdashIdDecodeError
+│   │   │   ├── auth.ts                 # Handover, JWT cookie, getAuth, SessionExpiredError, authErrorResponse (AuthPayload incl. vendorId)
 │   │   │   ├── rdash-id.ts             # rDash hashid encode/decode
 │   │   │   ├── respond-safe.ts
 │   │   │   └── rdash-source/           # index.ts (getRdashSource), mode.ts (getDataSource), types.ts (RdashSource), real.ts, mock.ts, allocation-rows.ts (config+details merge), mock-data/
 │   │   ├── embedded-bootstrap-url.ts   # Pure bootstrap URL helpers + BOOTSTRAP_ERROR_MESSAGES (unit tested)
-│   │   ├── api-fetch.ts                # Client fetch wrapper (401 → /embedded/bootstrap?force=1)
+│   │   ├── api-fetch.ts                # Client fetch wrapper (401 → save form → /embedded/bootstrap?force=1; loop guard)
 │   │   ├── auth-context.tsx            # Client SessionProvider + useSession + buildUrl (carries vendorId)
 │   │   ├── embedded-parent-origin.ts
 │   │   └── utils.ts
 │   └── types/{rdash,payments}.ts
-├── tests/                              # vitest: helpers.ts, middleware-coverage, auth-cookie-sink-coverage, vendor-context, refresh, payments
-├── db/migrations/                      # 001_pbe_user_sessions.sql
+├── tests/                              # vitest: helpers.ts, middleware-coverage, vendor-context, session-expiry, api-fetch, payment-draft, payments
 ├── k8s/{dev,prod}/
 ├── .github/workflows/                  # deploy-dev.yml, deploy-prod.yml
 ├── docs/api-notes.md                   # Every unverified rDash assumption (each marked TODO(verify) in code)
@@ -186,12 +191,8 @@ pbe2/
 └── docker-compose.yml
 ```
 
-## Database Schema
-Single table — no business data is stored; all payment data lives in rDash.
-
-| Table | Purpose |
-|-------|---------|
-| `pbe_user_sessions` | rDash token cache keyed by `user_id` (`access_token`, `refresh_token`, `expires_at`, `refresh_expires_at`, `prior_refresh_token`, `updated_at`). Same shape as RFQ migration 025. |
+## Database
+None. No business data and no session store — all payment data lives in rDash and the session is the encrypted cookie (access token only). `DATABASE_URL` is not used; startup does not need it.
 
 ## rDash API Endpoints (consumed)
 Base: `RDASH_API_URL`. List endpoints **must** go through `paginateRdash` — never single-page.
@@ -199,7 +200,6 @@ Base: `RDASH_API_URL`. List endpoints **must** go through `paginateRdash` — ne
 | Endpoint | Purpose | Required Permission |
 |---|---|---|
 | `POST /api/v1/auth/embedded/handover/consume/` | Handover code → tokens | client_assertion (JWT) |
-| `POST /api/v1/auth/token/` | Refresh | refresh_token grant |
 | `GET /v2/vendors` | Server-side vendor verification only (`assertVendorInOrg`) — never shown as a dropdown | `CAN_ACCESS_MANAGE_VENDOR` (per RFQ docs; **verify**) |
 | `GET /v2/projects` | Project names for the Project Name column — **DRF paginated** (confirmed, 809 in the prod org); fetched only when a row has a `project_id`, id → name list cached server-side per token for 5 min (no id filter known — api-notes #18) | auth-only |
 | `GET /v2/vendor-payment-requests/config/?vendor_id&limit&offset&payment_request_ids` | Vendor's payment requests (all projects) + amounts | **TBD** |
@@ -240,7 +240,7 @@ Config now returns `project_id` (**required** in the corrected Swagger; present 
 Null values render as `—`. Never substitute defaults.
 
 ### Error surfacing
-Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not have access to perform this action" }` at HTTP 403. 401 that can't be refreshed → clear cookie → re-handover. Every auth 401 body is the fixed `{ "error": "Not authenticated" }` (`authErrorResponse`); the reason goes to `console.error`. rDash error bodies/messages never become client text: non-2xx or `success: false` → `RdashUpstreamError` ("rDash request failed"), unexpected list shape → `RdashResponseShapeError`, undecodable id → `RdashIdDecodeError` (never an empty list, never a raw id). Other upstream errors → 502 with a generic message + detailed `console.error`. Never return fake empty arrays on error. A failed details call marks that row with an error — never silently dropped.
+Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not have access to perform this action" }` at HTTP 403. rDash 401 or an expired access token → `{ "error": "session_expired" }` at 401, cookie cleared → re-handover (never refreshed, never retried). Every other auth 401 body is the fixed `{ "error": "Not authenticated" }` (`authErrorResponse`); the reason goes to `console.error`. rDash error bodies/messages never become client text: non-2xx or `success: false` → `RdashUpstreamError` ("rDash request failed"), unexpected list shape → `RdashResponseShapeError`, undecodable id → `RdashIdDecodeError` (never an empty list, never a raw id). Other upstream errors → 502 with a generic message + detailed `console.error`. Never return fake empty arrays on error. A failed details call marks that row with an error — never silently dropped.
 
 ## API Routes (this app)
 ### Auth / Session / Utility
@@ -258,7 +258,7 @@ Same as RFQ: rDash 403 → `RdashPermissionError` → `{ "error": "You do not ha
 | `/api/rdash/payment-requests` | GET | Uses session `vendorId` (no vendor param). Config (all pages) + details (parallel, concurrency 5, only rows with `project_id`) → merged allocation rows |
 | `/api/rdash/payment-entries/bulk` | POST | Body `{ header, rows }` → re-fetch config for session vendor → server validation → build payload → bulk create → `{ count, created, failed, recordedAmount, notRecordedAmount }` |
 
-All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map errors via `lib/server/route-errors.ts` (401 / 403 fixed message / 502 generic). Bulk details:
+All three use `getSessionOrMock` and map errors via `lib/server/route-errors.ts` (401 `session_expired` or fixed message / 403 fixed message / 502 generic). Bulk details:
 - Body `{ header, rows: [{ payment_request_id, amount, remark }] }`; only those fields are read. A vendor id in the body is ignored; a vendor id in the **query** that differs from the session makes `getAuth` refuse the request (401).
 - Validation (`lib/payments/validation.ts`, exact BigInt units) → `400 { error: "Validation failed", fieldErrors: { form[], header{}, rows{ [index]: { field: msg } } } }`; the bulk API is not called.
 - If rDash's `created` + `failed` don't cover every submitted id exactly once → `502` ("Could not confirm which payments were recorded…"): nothing is reported as "not recorded", so a retry can't pay twice.
@@ -283,19 +283,18 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 ## Deployment
 
 ### CI/CD
-- GitHub Actions on push to `main` (paths: `src/`, `public/`, `db/`, `Dockerfile`, `package.json`).
+- GitHub Actions on push to `main` (paths: `src/`, `public/`, `Dockerfile`, `package.json`).
 - Pipeline: lint → type-check → test → Docker build → push ACR → deploy AKS.
 
 ### K8s
 - Namespaces `pbe-dev` / `pbe-prod`. Probes hit `/api/health`.
-- Secrets: `pbe-db-credentials`, `pbe-app-config`.
+- Secret: `pbe-app-config` (no database credentials — PBE has no DB).
 - Manifests set `RDASH_DATA_SOURCE=real` explicitly.
 - CSP `frame-ancestors` allows only the rDash UI origin; no `X-Frame-Options: DENY`.
 
 ### Environment
 | Variable | When | Description |
 |---|---|---|
-| `DATABASE_URL` | Runtime | Postgres connection (session cache) |
 | `RDASH_API_URL` | Runtime | rDash API base |
 | `RDASH_APP_URL` | Runtime | rDash web app URL |
 | `RDASH_PBE_TAB_CODE` | Runtime | Embedded tab slug; must equal the handover `app_slug`. Required when `RDASH_DATA_SOURCE=real` (startup fails without it); not used in mock mode |
@@ -333,10 +332,10 @@ All three are wrapped in `withAuthCookies`, use `getSessionOrMock` and map error
 - `npm run build` — standalone production build
 - `npm run lint` — ESLint
 - `npm test` — vitest
-- `docker compose up --build` — local app + postgres
-- `sh db/migrate.sh` — run migrations (needs `DATABASE_URL`)
+- `docker compose up --build` — local app
 
 ## Open Items (verify with rDash team)
+- **Access-token lifetime** (`expires_in` from the handover): every expiry costs a re-handover (form restored). Confirm the value (~15 min assumed) and that the parent always answers `rdash_iframe_ready` with a fresh code while its own session is alive (docs/api-notes.md #6).
 - **App registration**: `client_id`, `kid`, tab slug, iframe origin whitelist, hashid salt (we send the public key).
 - **Iframe URL encoding**: confirm rDash encodes `vendor_id` / `org_id` / `user_id` with the PBE per-app salt, and that the sub-tab `src` is always `/embedded/bootstrap?...` (never `/api/session` directly).
 - **Embedded sub-tab on the vendor page**: confirm a custom embedded app can mount under Manage Vendor → Vendor Payments.

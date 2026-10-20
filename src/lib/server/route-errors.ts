@@ -7,7 +7,9 @@ export const PERMISSION_MESSAGE = "You do not have access to perform this action
 export const UPSTREAM_MESSAGE = "Could not load data from rDash. Please try again.";
 
 // One error mapping for every BFF route (CLAUDE.md "Error surfacing"):
-//   AuthError            → 401 (fixed message, cookie cleared) → client re-handovers
+//   AuthError            → 401 (cookie cleared) → client re-handovers;
+//                          SessionExpiredError (expired token / rDash 401)
+//                          → { error: "session_expired" }, else a fixed message
 //   RdashPermissionError → 403 with the fixed permission message
 //   anything else        → 502 generic message; details only in console.error
 // Never an empty list / fake success.
@@ -24,10 +26,4 @@ export function rdashRouteError(err: unknown, route: string): NextResponse {
   }
   console.error(`[${route}] upstream error`, err);
   return NextResponse.json({ error: UPSTREAM_MESSAGE }, { status: 502 });
-}
-
-// getAuth / getSessionOrMock return cookieHeader when they rotated the cookie.
-export function withCookieHeader(res: NextResponse, cookieHeader: string | undefined): NextResponse {
-  if (cookieHeader) res.headers.append("Set-Cookie", cookieHeader);
-  return res;
 }

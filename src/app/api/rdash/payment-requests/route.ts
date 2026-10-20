@@ -1,10 +1,10 @@
 import { NextRequest } from "next/server";
-import { getSessionOrMock, withAuthCookies } from "@/lib/server/auth";
+import { getSessionOrMock } from "@/lib/server/auth";
 import { getRdashSource } from "@/lib/server/rdash-source";
 import { loadAllocationRows } from "@/lib/server/rdash-source/allocation-rows";
 import { isPayable } from "@/lib/payments/payable";
 import { safeJson } from "@/lib/server/respond-safe";
-import { rdashRouteError, withCookieHeader } from "@/lib/server/route-errors";
+import { rdashRouteError } from "@/lib/server/route-errors";
 
 export const dynamic = "force-dynamic";
 
@@ -17,14 +17,14 @@ export const dynamic = "force-dynamic";
 //  - Only PAYABLE requests are kept (lib/payments/payable.ts: status in
 //    PAYABLE_STATUSES AND payment_due > 0); the rest are dropped BEFORE any
 //    details call.
-export const GET = withAuthCookies(async (request: NextRequest) => {
+export async function GET(request: NextRequest) {
   try {
-    const { auth, cookieHeader } = await getSessionOrMock(request);
+    const { auth } = await getSessionOrMock(request);
     const rows = await loadAllocationRows(getRdashSource(auth), auth.vendorId, {
       keep: isPayable,
     });
-    return withCookieHeader(safeJson({ rows }, { route: "GET /api/rdash/payment-requests" }), cookieHeader);
+    return safeJson({ rows }, { route: "GET /api/rdash/payment-requests" });
   } catch (err) {
     return rdashRouteError(err, "GET /api/rdash/payment-requests");
   }
-});
+}

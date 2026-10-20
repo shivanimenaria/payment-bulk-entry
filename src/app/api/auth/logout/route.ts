@@ -1,10 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  clearAuthCookie,
-  clearSessionCache,
-  readAuthCookieFromRequest,
-  getRequestLogContext,
-} from "@/lib/server/auth";
+import { clearAuthCookie, readAuthCookieFromRequest, getRequestLogContext } from "@/lib/server/auth";
 import { checkSameOriginRequest } from "@/lib/server/request-guards";
 
 // Session-dependent: always render per request, never prerender at build.
@@ -12,16 +7,10 @@ export const dynamic = "force-dynamic";
 
 // Called when the parent rdash app posts a `{ type: "rdash_logout" }` message
 // into the PBE iframe (see EmbeddedLogoutListener). The iframe's listener
-// fetches this route which:
-//
-//   1. Clears the in-process `refreshInFlight` map + `pbe_user_sessions` DB
-//      row for this user, so any concurrent refresh attempts can't serve a
-//      cached outcome for the now-dead session.
-//   2. Sets `pbe-auth=; Max-Age=0` with the exact same attributes
-//      (httpOnly / secure / sameSite=none / partitioned / path=/) as
-//      `setAuthCookie` — without attribute parity the browser would treat
-//      the response as creating a *different* cookie and leave the original
-//      alive.
+// fetches this route which sets `pbe-auth=; Max-Age=0` with the exact same
+// attributes (httpOnly / secure / sameSite=none / partitioned / path=/) as
+// `setAuthCookie` — without attribute parity the browser would treat the
+// response as creating a *different* cookie and leave the original alive.
 //
 // Cross-origin: rdash-api (the embedded token store) has already revoked
 // the session via its own `/api/v1/auth/logout/` by the time we get here.
@@ -31,7 +20,7 @@ export const dynamic = "force-dynamic";
 // Returns 403 for requests that fail the same-origin CSRF guard. Otherwise
 // always returns 204 — even on errors we want the parent's logout flow to
 // continue uninterrupted. If the cookie clear fails for some reason, the
-// next API call's revoked-outcome path (Fix D) will catch it.
+// next API call gets 401 session_expired from rDash and re-handovers.
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
   const ctx = await getRequestLogContext();
@@ -71,25 +60,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return response;
   }
 
-  let cacheCleared = false;
-  try {
-    await clearSessionCache(userId);
-    cacheCleared = true;
-  } catch (err) {
-    console.error("[auth/logout] clearSessionCache failed", { userId, err, ...ctx });
-    // Continue — cookie clear is the user-visible part.
-  }
-
   const response = new NextResponse(null, { status: 204 });
   clearAuthCookie(response);
 
-  // Exit log — confirms both halves (DB cache + Set-Cookie) executed and
-  // gives total latency. Together with the entry log above, you get a
+  // Exit log — confirms the Set-Cookie clear executed and gives total
+  // latency. Together with the entry log above, you get a
   // bracket per logout that tells you "this user's PBE session was torn
   // down at T, from this referer, took Xms".
   console.info("[auth/logout] cleared session, returning 204", {
     userId,
-    cacheCleared,
     durationMs: Date.now() - startedAt,
     ...ctx,
   });

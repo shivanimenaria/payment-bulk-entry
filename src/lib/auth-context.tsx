@@ -38,8 +38,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<SessionData>(EMPTY_SESSION);
 
   // Dedup concurrent pingAuth calls (mount + visibilitychange + interval can
-  // overlap). Multiple in-flight /api/auth/me requests race the cookie write
-  // back from middleware and trigger refresh-token replay.
+  // overlap) so a burst becomes one /api/auth/me request.
   const inflightRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {

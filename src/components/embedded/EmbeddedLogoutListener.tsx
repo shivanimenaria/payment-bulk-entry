@@ -16,8 +16,8 @@ const LOGOUT_MESSAGE_TYPE = "rdash_logout";
 // the PBE origin is on a different site from rdash's cookies, so rdash's
 // logout can't reach into PBE's cookie jar. Without this listener, the
 // next time the user does anything in PBE the stale cookie
-// gets sent → 401 from rdash-api → refresh fails → Fix D eventually clears
-// the cookie. That recovery path works, but it costs one round-trip the
+// gets sent → 401 from rdash-api → 401 session_expired clears the cookie.
+// That recovery path works, but it costs one round-trip the
 // user sees as a transient error / re-handover. Pre-clearing here short-
 // circuits all of that.
 //

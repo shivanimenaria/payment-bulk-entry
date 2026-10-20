@@ -6,7 +6,7 @@ import { Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shell/PageHeader";
 import { rdButtonOutline, rdButtonPrimary, rdCard, rdTextLink } from "@/components/rd/styles";
 import { useUI } from "@/components/ui/toast-confirm";
-import { apiFetch } from "@/lib/api-fetch";
+import { apiFetch, onBeforeRehandover } from "@/lib/api-fetch";
 import { useSession } from "@/lib/auth-context";
 import { validateAllocation } from "@/lib/payments/validation";
 import { computeTotals } from "@/lib/payments/totals";
@@ -21,6 +21,7 @@ import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
 import { clearAppliedAmounts, dismissFailedRow, payInFull, setRowAmount } from "@/lib/payments/allocation";
 import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
 import { buildRetryEntries, buildRetryRequest, removeFailedId, retryAmountPaid } from "@/lib/payments/retry";
+import { applyDraftRows, buildDraft, clearDraft, saveDraft, takeDraft } from "@/lib/payments/draft";
 import {
   isBulkSubmitResult,
   isValidationRejection,
@@ -64,6 +65,16 @@ const LOAD_ERROR = "Could not load payment requests. Please try again.";
 const SUBMIT_UNKNOWN =
   "Could not confirm whether the payments were recorded. Check Payment Entries in rDash before submitting again.";
 const REFRESH_ERROR = "Payments were submitted, but the table could not be refreshed.";
+const SESSION_EXPIRED_TEXT = "Your session expired. Signing in again…";
+
+// sessionStorage for the unsaved-form draft; null when the browser blocks it.
+function draftStorage(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
 
 const errorText = (body: unknown, fallback: string): string =>
   body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
@@ -73,6 +84,8 @@ const errorText = (body: unknown, fallback: string): string =>
 async function fetchRows(): Promise<{ ok: true; rows: AllocationRow[] } | { ok: false; message: string }> {
   try {
     const res = await apiFetch("/api/rdash/payment-requests", { cache: "no-store" });
+    // 401: apiFetch is already navigating to a fresh handover.
+    if (res.status === 401) return { ok: false, message: SESSION_EXPIRED_TEXT };
     const body: unknown = await res.json().catch(() => null);
     if (!res.ok) return { ok: false, message: errorText(body, LOAD_ERROR) };
     const list = body && typeof body === "object" ? (body as { rows?: unknown }).rows : undefined;
@@ -92,7 +105,7 @@ async function fetchRows(): Promise<{ ok: true; rows: AllocationRow[] } | { ok: 
 // holds state and wires events.
 export function NewPaymentClient() {
   const router = useRouter();
-  const { buildUrl, dataSource } = useSession();
+  const { buildUrl, dataSource, vendorId } = useSession();
   const { confirm } = useUI();
 
   const [header, setHeader] = useState<PaymentHeaderValue>(EMPTY_HEADER);
@@ -152,6 +165,44 @@ export function NewPaymentClient() {
   const totals = useMemo(() => computeTotals(header.amountPaid, visibleRows), [header.amountPaid, visibleRows]);
   const currency = useMemo(() => ({ symbol: selectedOption?.symbol || null, mixed: false }), [selectedOption]);
   const validation = useMemo(() => validateAllocation(header, visibleRows), [header, visibleRows]);
+
+  // ── Session expiry (re-handover) ──
+  // Latest form state for the save hook below (it runs outside React).
+  const draftSourceRef = useRef({ vendorId, currency: selectedCurrency, header, rows });
+  draftSourceRef.current = { vendorId, currency: selectedCurrency, header, rows };
+  // apiFetch calls this right before leaving the page for a fresh handover.
+  useEffect(
+    () =>
+      onBeforeRehandover(() => {
+        const s = draftSourceRef.current;
+        const draft = buildDraft(s.vendorId, s.currency, s.header, s.rows);
+        const store = draftStorage();
+        if (draft && store) saveDraft(store, draft);
+      }),
+    [],
+  );
+  // Back from the handover: restore the saved form once, into rows that
+  // still exist, then the draft is gone (takeDraft deletes it).
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current || load.status !== "ready" || !vendorId) return;
+    restoredRef.current = true;
+    const store = draftStorage();
+    const draft = store ? takeDraft(store, vendorId) : null;
+    if (!draft) return;
+    setHeader(draft.header);
+    setRows((rs) => applyDraftRows(rs, draft));
+    if (draft.currency) setSelectedCurrency(draft.currency);
+    setTouched(
+      new Set(
+        (Object.keys(draft.header) as (keyof PaymentHeaderValue)[]).filter(
+          (k) => draft.header[k] !== "" && draft.header[k] !== null,
+        ),
+      ),
+    );
+    setDirty(true);
+  }, [load.status, vendorId]);
+
   const current = useMemo<Sent | null>(
     () =>
       validation.ok
@@ -221,6 +272,7 @@ export function NewPaymentClient() {
     );
     let result: BulkSubmitResult | null = null;
     let fullSuccess = false;
+    let sessionExpired = false;
     try {
       let res: Response;
       try {
@@ -235,12 +287,19 @@ export function NewPaymentClient() {
         setOutcome({ kind: "error", message: SUBMIT_UNKNOWN });
         return;
       }
-      // 401: apiFetch already redirected to a fresh handover.
-      if (res.status === 401) return;
+      // 401: apiFetch saved the form and is navigating to a fresh handover.
+      // The submit is NOT re-sent — the user submits again from the restored
+      // form (a payment rDash already recorded shows as paid after reload).
+      if (res.status === 401) {
+        sessionExpired = true;
+        return;
+      }
       const body: unknown = await res.json().catch(() => null);
 
       if (res.ok && isBulkSubmitResult(body)) {
         result = body;
+        const store = draftStorage();
+        if (store) clearDraft(store, vendorId);
         fullSuccess = body.failed.length === 0;
         setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels, symbol: selectedOption?.symbol || null });
         if (fullSuccess) {
@@ -265,8 +324,8 @@ export function NewPaymentClient() {
       }
     } finally {
       // Refetch after every response (and after a network error — the
-      // submit may have reached rDash).
-      await refreshAfter(result, fullSuccess);
+      // submit may have reached rDash). Not after a 401: the page is leaving.
+      if (!sessionExpired) await refreshAfter(result, fullSuccess);
       inFlightRef.current = false;
       setSubmitting(null);
     }

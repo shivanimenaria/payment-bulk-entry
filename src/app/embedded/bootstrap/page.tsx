@@ -47,9 +47,9 @@ export default function EmbeddedBootstrap() {
       return;
     }
     const next = sanitizeNext(params.get("next"));
-    // `force=1` is set by api-fetch on 401: cookie may look structurally valid
-    // (so /api/auth/me would 200) but the underlying rDash tokens are dead.
-    // Skip the short-circuit and always go ask the parent for a fresh
+    // `force=1` is set by api-fetch on 401 (session_expired: the access token
+    // expired or rDash rejected it — PBE never refreshes). Skip the
+    // /api/auth/me short-circuit and always ask the parent for a fresh
     // handover code.
     const forceHandover = params.get("force") === "1";
     // Always preserve project_id / org_id / user_id / vendor_id from the bootstrap URL

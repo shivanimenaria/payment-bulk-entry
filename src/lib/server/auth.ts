@@ -1,6 +1,5 @@
 import "server-only";
 import { randomUUID } from "crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { NextRequest, NextResponse } from "next/server";
 import { cookies, headers } from "next/headers";
 import { EncryptJWT, jwtDecrypt, SignJWT, importPKCS8 } from "jose";
@@ -15,7 +14,6 @@ const FRESH_HEADER = "x-pbe-auth-fresh";
 // All config is read lazily via requireEnv so `next build` works without
 // runtime secrets; a missing value throws on first use (never defaults).
 const consumeUrl = () => `${requireEnv("RDASH_API_URL")}/api/v1/auth/embedded/handover/consume/`;
-const tokenUrl = () => `${requireEnv("RDASH_API_URL")}/api/v1/auth/token/`;
 export const COOKIE_NAME = "pbe-auth";
 
 // Shared with middleware.ts so both runtimes use the same validated key.
@@ -55,9 +53,9 @@ const CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-b
 // ── Types ───────────────────────────────────────────────────
 export interface AuthPayload {
   accessToken: string;
-  refreshToken: string;
-  expiresAt: number;       // unix seconds
-  refreshExpiresAt: number;
+  // Access-token expiry (unix seconds). The cookie lives until then; there is
+  // no refresh token — expiry means a fresh handover.
+  expiresAt: number;
   orgId: string;
   projectId: string;
   userId: string;
@@ -113,7 +111,6 @@ export function isSafeRestorePath(path: string | undefined | null): path is stri
 
 interface GetAuthResult {
   auth: AuthContext;
-  cookieHeader?: string; // non-null when refresh occurred — caller must set on response
 }
 
 // ── Cookie encrypt / decrypt ────────────────────────────────
@@ -131,7 +128,7 @@ async function decrypt(token: string): Promise<AuthPayload> {
 
 // Identity + origin context for diagnostic logs. Reads cookie (for
 // userId/orgId) and request headers (for referer / origin / user-agent /
-// host) so log lines on the 401-refresh and revoked-cookie paths carry
+// host) so log lines on the session-expired and handover paths carry
 // enough RCA context to answer "which user, on which device, looking at
 // which page, triggered this?" — the questions that come up first whenever
 // auth flakes in prod. Callers that already have a decrypted `payload` in
@@ -251,7 +248,7 @@ function normalizePayloadIds(p: AuthPayload): AuthPayload {
 // separate entries in the jar. A single Set-Cookie matches only one of them;
 // the other ghosts on forever, gets sent on the next request from the wrong
 // context, and decrypts back into a dead session. Dual-emit keeps both
-// variants in lockstep so a logout (or any refresh) clears/refreshes BOTH.
+// variants in lockstep so a logout (or an expiry) clears BOTH.
 // Dev mode skips the dual because SameSite=None+Secure isn't available on
 // http://localhost — a single Lax cookie covers it.
 function writeAuthCookieHeaders(response: NextResponse, value: string, maxAge: number): void {
@@ -264,8 +261,13 @@ function writeAuthCookieHeaders(response: NextResponse, value: string, maxAge: n
   response.headers.append("Set-Cookie", `${base}; Secure; SameSite=None`);
 }
 
+// Max-Age = until the access token expires (no refresh token to outlive it).
+function cookieMaxAge(payload: AuthPayload): number {
+  return Math.max(0, payload.expiresAt - Math.floor(Date.now() / 1000));
+}
+
 export function setAuthCookie(response: NextResponse, payload: AuthPayload): void {
-  const maxAge = Math.max(0, payload.refreshExpiresAt - Math.floor(Date.now() / 1000));
+  const maxAge = cookieMaxAge(payload);
   // Fire-and-forget — encrypt is async but the response is typically still
   // being assembled. Pre-existing behavior; setAuthCookieAsync is the awaited
   // variant for callers that need ordering guarantees.
@@ -275,7 +277,7 @@ export function setAuthCookie(response: NextResponse, payload: AuthPayload): voi
 }
 
 export async function setAuthCookieAsync(response: NextResponse, payload: AuthPayload): Promise<void> {
-  const maxAge = Math.max(0, payload.refreshExpiresAt - Math.floor(Date.now() / 1000));
+  const maxAge = cookieMaxAge(payload);
   const encrypted = await encrypt(payload);
   writeAuthCookieHeaders(response, encrypted, maxAge);
 }
@@ -285,71 +287,35 @@ export function clearAuthCookie(response: NextResponse): void {
 }
 
 // Standard 401 response builder for route handlers that catch AuthError. Bakes
-// in the dual-emit cookie clear so a revoked-refresh loop can't survive past
-// one round-trip: without this, route handlers used to return a bare 401 while
-// the stale unpartitioned cookie variant lived on in the browser jar, got sent
-// on the next request, and triggered the same "Token has been revoked" →
-// refresh → revoked cycle indefinitely. The dual-emit happens at the response
-// boundary (raw NextResponse.headers.append), never via cookies().
-// The client only ever sees a fixed message; the specific reason (mismatch,
-// expired, missing vendor, …) goes to the server log.
+// in the dual-emit cookie clear so a dead session can't survive past one
+// round-trip: without it the stale unpartitioned cookie variant would live on
+// in the browser jar and be sent again on the next request. The dual-emit
+// happens at the response boundary (raw NextResponse.headers.append), never
+// via cookies().
+// The client only ever sees a fixed message: SESSION_EXPIRED for an expired
+// access token / rDash 401 (the browser re-handovers and restores the form),
+// AUTH_ERROR_CLIENT_MESSAGE for everything else. The specific reason
+// (mismatch, missing vendor, …) goes to the server log.
 export const AUTH_ERROR_CLIENT_MESSAGE = "Not authenticated";
+export const SESSION_EXPIRED = "session_expired";
 export function authErrorResponse(err: AuthError, status: number = 401): NextResponse {
   console.error("[auth] request rejected", { status, reason: err.message });
-  const response = NextResponse.json({ error: AUTH_ERROR_CLIENT_MESSAGE }, { status });
+  const error = err instanceof SessionExpiredError ? SESSION_EXPIRED : AUTH_ERROR_CLIENT_MESSAGE;
+  const response = NextResponse.json({ error }, { status });
   clearAuthCookie(response);
   return response;
 }
 
-// ── Refresh cookie sink (dual-emit after a lazy refresh) ────
-// Next's cookies().set() keeps ONE cookie per name, and when a route returns,
-// Next re-parses the response's Set-Cookie headers by name if cookies() was
-// mutated (appendMutableCookies) — collapsing any dual-emit. So the refresh
-// path never touches cookies(); it queues the new value here and
-// withAuthCookies writes it onto the route's response with
-// writeAuthCookieHeaders (Partitioned + unpartitioned in prod, single Lax in
-// dev). Every route that can trigger a refresh (anything calling apiFetch /
-// paginateRdash / rdashFetchWithRetry / refreshAuthForRequest) MUST be
-// wrapped — enforced by tests/auth-cookie-sink-coverage.test.ts.
-type AuthCookieSink = { pending?: { value: string; maxAge: number } };
-const authCookieSink = new AsyncLocalStorage<AuthCookieSink>();
-
-function queueAuthCookie(value: string, maxAge: number): void {
-  const sink = authCookieSink.getStore();
-  if (!sink) {
-    // Server component (can't set cookies) or an unwrapped route. Logged
-    // loudly: an unwrapped route would leave the browser on a rotated
-    // refresh token.
-    console.error("[auth] refreshed cookie not written: caller is not wrapped in withAuthCookies");
-    return;
-  }
-  sink.pending = { value, maxAge };
+// No token refresh. rDash refresh tokens are single-use, and concurrent
+// refreshes revoke the whole session ("replay"), so PBE never keeps or uses
+// one. When the access token expires (cookie clock) or rDash answers 401, the
+// request fails with SessionExpiredError → 401 { error: "session_expired" }
+// + cookie cleared, and the iframe gets a fresh handover code from rDash
+// (src/lib/api-fetch.ts → /embedded/bootstrap?force=1).
+function isAccessTokenExpired(payload: AuthPayload): boolean {
+  const exp = payload.expiresAt;
+  return typeof exp !== "number" || !Number.isFinite(exp) || exp <= Math.floor(Date.now() / 1000);
 }
-
-export function withAuthCookies<A extends unknown[]>(
-  handler: (...args: A) => Promise<Response>,
-): (...args: A) => Promise<Response> {
-  return async (...args: A) => {
-    const sink: AuthCookieSink = {};
-    const res = await authCookieSink.run(sink, () => handler(...args));
-    if (!sink.pending) return res;
-    const out = res instanceof NextResponse ? res : new NextResponse(res.body, res);
-    // Drop any single-emit copy so the browser gets exactly the pair.
-    const others = out.headers.getSetCookie().filter((c) => !c.startsWith(`${COOKIE_NAME}=`));
-    out.headers.delete("Set-Cookie");
-    for (const c of others) out.headers.append("Set-Cookie", c);
-    writeAuthCookieHeaders(out, sink.pending.value, sink.pending.maxAge);
-    return out;
-  };
-}
-
-// Token refresh is lazy: `apiFetch` / `paginateRdash` catch 401 from rDash
-// and call `refreshAuthForRequest` (above) to rotate-and-retry. getAuth just
-// surfaces whatever's in the cookie — the access token may technically be
-// past its issued `expiresAt`, but rDash often accepts a small grace window
-// and even when it doesn't, the very next rDash call triggers the refresh
-// path. Never throwing "Session expired" purely on the cookie's clock means
-// we don't kick a user back to handover on a token that still works.
 
 // ── getAuth (for API routes) ────────────────────────────────
 export async function getAuth(request: NextRequest): Promise<GetAuthResult> {
@@ -373,8 +339,7 @@ export async function getAuth(request: NextRequest): Promise<GetAuthResult> {
   // refuse to use a cookie whose decrypted userId doesn't match. Without
   // this, a stale partitioned cookie left over from a prior user — common
   // when a different rdash user logs into the same browser — would hand its
-  // access token to rdash-api and either misattribute writes or trigger a
-  // 401→refresh→replay cascade that revokes the legitimate user's chain.
+  // access token to rdash-api and misattribute writes.
   // Mismatch surfaces as 401 to the caller; the iframe is expected to
   // recover by re-handovering through /api/session.
   const urlUserIdRaw =
@@ -432,11 +397,9 @@ export async function getAuth(request: NextRequest): Promise<GetAuthResult> {
     "getAuth",
   );
 
-  const now = Math.floor(Date.now() / 1000);
-  // Only the *refresh* token's expiry is a hard wall — past that we cannot
-  // recover and the iframe must re-handover.
-  if (payload.refreshExpiresAt <= now) {
-    throw new AuthError("Session expired");
+  // Expired access token: never sent to rDash (it would only 401).
+  if (isAccessTokenExpired(payload)) {
+    throw new SessionExpiredError("Access token expired (cookie clock)");
   }
 
   return {
@@ -482,12 +445,12 @@ function assertSessionVendor(payload: AuthPayload, urlVendorIdRaw: string, where
 // orgId and vendorId are NEVER taken from the URL: orgId comes only from the
 // handover and vendorId only from the server-verified handover redirect. A
 // URL org/vendor/user that differs from the cookie is refused (middleware
-// clears the cookie in that case). The encrypted accessToken / refreshToken
-// always come from the cookie (URL params can never grant access on their own).
+// clears the cookie in that case). The encrypted accessToken always comes
+// from the cookie (URL params can never grant access on their own).
 export async function getAuthFromCookies(searchParams?: Record<string, string | string[] | undefined>): Promise<AuthContext> {
   const cookieStore = await cookies();
-  // Middleware refreshed tokens for this request and forwarded the fresh
-  // payload via a request header (cookies() propagation through
+  // Middleware re-issued the cookie for this request (project / lastPath
+  // sync) and forwarded the fresh payload via a request header (cookies() propagation through
   // NextResponse.next({ request }) is unreliable). Prefer it.
   let cookieValue: string | undefined;
   try {
@@ -524,9 +487,8 @@ export async function getAuthFromCookies(searchParams?: Record<string, string | 
   const urlVendorIdRaw = pickStr(searchParams?.vendorId) || pickStr(searchParams?.vendor_id) || "";
 
   // Cross-user cookie guard (Fix B, server-component side). Same rationale
-  // as the check in getAuth above. The server component can't trigger a
-  // refresh, so its only safe response is to throw and let the page render
-  // an error/redirect to /api/session. Without this guard a stale cookie
+  // as the check in getAuth above. The only safe response is to throw and
+  // let the page render an error/redirect to /api/session. Without this guard a stale cookie
   // would yield a page that does SSR fetches with the prior user's access
   // token, then 401s the moment any data call fires.
   if (urlUserId && payload.userId && urlUserId !== payload.userId) {
@@ -548,8 +510,10 @@ export async function getAuthFromCookies(searchParams?: Record<string, string | 
   }
   assertSessionVendor(payload, urlVendorIdRaw, "getAuthFromCookies");
 
-  // For server components, we can't refresh (no response to set cookie on).
-  // If token is expired, the client will hit /api/auth/me which triggers refresh.
+  if (isAccessTokenExpired(payload)) {
+    throw new SessionExpiredError("Access token expired (cookie clock)");
+  }
+
   return {
     accessToken: payload.accessToken,
     orgId: payload.orgId,
@@ -563,57 +527,24 @@ export async function getAuthFromCookies(searchParams?: Record<string, string | 
   };
 }
 
-// ── Lazy refresh on 401 ───────────────────────────────────────────────────
-// Called from `apiFetch`/`paginateRdash` after rDash returns 401. Coordinates
-// concurrent refresh attempts so we never re-use a refresh token rDash has
-// already rotated (the "replay detected" event that revokes the whole
-// session). Two-level serialization:
-//   1. In-process single-flight by userId. Two concurrent rDash calls inside
-//      one Node pod share the same refresh attempt.
-//   2. Postgres advisory lock + cached `pbe_user_sessions` row. Cross-pod and
-//      cross-restart: if another flow already refreshed and persisted, every
-//      subsequent caller just reads the cached row instead of calling rDash.
-// After the refresh the new cookie is queued (queueAuthCookie) and written by
-// withAuthCookies onto the route's response, dual-emitted. Server components
-// have no response to write to; the DB cache still keeps the rest of the flow
-// coherent there.
-import { query, withTransaction, queryWithClient } from "./db";
-import type { PoolClient } from "pg";
-
-const refreshInFlight = new Map<string, Promise<RefreshOutcome>>();
-
-export type RefreshOutcome =
-  | { kind: "ok"; payload: AuthPayload }
-  | { kind: "revoked" }
-  | { kind: "transient" };
-
-interface SessionCacheRow {
-  access_token: string;
-  refresh_token: string;
-  expires_at: string;            // BIGINT → string from pg
-  refresh_expires_at: string;
-}
-
-// Hash a userId to the 32-bit signed-int domain pg_advisory_lock expects.
-// `hashtext` in pg returns INT4 (signed 32-bit); we mirror that range so
-// callers never see "out of range" when the userId is a long decimal string.
-function lockKey(userId: string): number {
-  let h = 0;
-  for (let i = 0; i < userId.length; i++) {
-    h = ((h << 5) - h + userId.charCodeAt(i)) | 0;
+// Best-effort read of the existing auth cookie off a NextRequest. Used by
+// /api/session to recover the prior payload (specifically `lastPath`) before
+// overwriting it with the post-handover cookie. Returns null on missing or
+// invalid cookies — the caller treats that as "no prior path to preserve".
+export async function readAuthCookieFromRequest(request: NextRequest): Promise<AuthPayload | null> {
+  const value = request.cookies.get(COOKIE_NAME)?.value;
+  if (!value) return null;
+  try {
+    const payload = await decrypt(value);
+    // Normalize legacy hashid IDs so callers can compare against the
+    // post-decode values written to new cookies without spurious mismatches.
+    return normalizePayloadIds(payload);
+  } catch {
+    return null;
   }
-  return h;
 }
 
-type RdashRefreshResult =
-  | { kind: "ok"; access: string; refresh: string; expiresIn: number; refreshExpiresIn: number }
-  | { kind: "revoked" }
-  | { kind: "transient" }
-  // 2xx but missing refresh_token / expires_in / refresh_token_expires_in.
-  // rDash has likely already rotated the old refresh token, so it must never
-  // be reused and lifetimes are never defaulted → AuthError (re-handover).
-  | { kind: "invalid"; missing: string[] };
-
+// ── Consume handover code ───────────────────────────────────
 // A positive number of seconds, or null (never a default).
 function positiveSeconds(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
@@ -621,10 +552,7 @@ function positiveSeconds(v: unknown): number | null {
 
 // Diagnostic-only JWT claim peek. Decodes the access token's payload (NO
 // signature check — never use this for auth decisions). Logged after every
-// fresh issuance so we can see when rDash drops/restores `is_admin`,
-// `roles`, etc. on a refresh. RCA: admin user occasionally gets 403s
-// because the access token rDash returned does NOT carry the admin claims
-// even though their account is admin; this catches the drift.
+// handover so we can see when rDash drops/restores `is_admin`, `roles`, etc.
 function peekAccessTokenClaims(accessToken: string): Record<string, unknown> | null {
   try {
     const parts = accessToken.split(".");
@@ -656,378 +584,9 @@ function summariseClaims(claims: Record<string, unknown> | null): Record<string,
   };
 }
 
-async function callRdashRefresh(refreshToken: string): Promise<RdashRefreshResult> {
-  const assertion = await buildClientAssertion(tokenUrl());
-  // Bound the rDash call. The caller holds a PG advisory lock for the whole
-  // refresh; an unbounded fetch could pin a pool connection forever if rDash
-  // hangs and starve every other DB operation in this pod (`pool.max = 5`).
-  // 4 s is enough for a healthy rDash (~300 ms typical) without keeping the
-  // user staring at a spinner. If the token endpoint is truly slow, the
-  // caller's helper surfaces this as AuthError → iframe re-handovers, which
-  // is faster than waiting 10 s for a hang that probably won't resolve.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4_000);
-  try {
-    const res = await fetch(tokenUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        ...(await getOutboundContextHeaders()),
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_assertion_type: CLIENT_ASSERTION_TYPE,
-        client_assertion: assertion,
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error(
-        "[auth/refresh] rDash refresh failed:",
-        res.status,
-        body.slice(0, 300),
-        await getRequestLogContext(),
-      );
-      const lower = body.toLowerCase();
-      const looksRevoked =
-        res.status === 401 ||
-        (res.status === 400 && (lower.includes("replay") || lower.includes("revoked") || lower.includes("invalid")));
-      return { kind: looksRevoked ? "revoked" : "transient" };
-    }
-    const json = await res.json();
-    const data = json.data || json;
-    if (!data.access_token) {
-      console.error("[auth/refresh] missing access_token in rDash response:", JSON.stringify(json).slice(0, 200));
-      return { kind: "transient" };
-    }
-    // Drift check: log the JWT claims rDash just issued. If `is_admin` or
-    // `roles` flip between refreshes for the same user, the intermittent
-    // 403s on admin accounts come from rDash side (different auth-service
-    // instances returning different claim sets).
-    console.log(
-      "[auth/refresh] fresh access token claims",
-      summariseClaims(peekAccessTokenClaims(data.access_token as string)),
-      await getRequestLogContext(),
-    );
-    // TODO(verify): refresh always returns refresh_token + both lifetimes
-    // (docs/api-notes.md → #6). Missing → "invalid" → AuthError.
-    const refresh = typeof data.refresh_token === "string" && data.refresh_token ? data.refresh_token : null;
-    const expiresIn = positiveSeconds(data.expires_in);
-    const refreshExpiresIn = positiveSeconds(data.refresh_token_expires_in);
-    if (!refresh || expiresIn === null || refreshExpiresIn === null) {
-      const missing = [
-        !refresh && "refresh_token",
-        expiresIn === null && "expires_in",
-        refreshExpiresIn === null && "refresh_token_expires_in",
-      ].filter(Boolean) as string[];
-      console.error("[auth/refresh] incomplete rDash refresh response", { missing });
-      return { kind: "invalid", missing };
-    }
-    return { kind: "ok", access: data.access_token as string, refresh, expiresIn, refreshExpiresIn };
-  } catch (err) {
-    console.error("[auth/refresh] threw:", err, await getRequestLogContext());
-    return { kind: "transient" };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Core locked-refresh. Run inside a transaction so the advisory lock is held
-// for the duration of the rDash call + the UPSERT.
-//
-// Cookie is the canonical source of "which session is the user on right now"
-// — after a re-handover the cookie carries the fresh tokens, the DB cache
-// still has the prior session's stale tokens. To avoid using a stale cache
-// row from before a re-handover (which would re-trigger rDash's revoke), we
-// only trust the cache when its refresh_token CHAIN includes the cookie's
-// refresh_token (i.e. cache was produced by rotating the cookie's R, so
-// cache.access_token is the live access token for this session).
-async function refreshTokensLocked(payload: AuthPayload): Promise<RefreshOutcome> {
-  const now = Math.floor(Date.now() / 1000);
-  return withTransaction(async (client: PoolClient) => {
-    await queryWithClient(client, "SELECT pg_advisory_xact_lock($1)", [lockKey(payload.userId)]);
-
-    const rows = await queryWithClient<SessionCacheRow & { prior_refresh_token: string | null }>(
-      client,
-      "SELECT access_token, refresh_token, expires_at, refresh_expires_at, prior_refresh_token FROM pbe_user_sessions WHERE user_id = $1",
-      [payload.userId]
-    );
-    const cached = rows[0];
-
-    // Cache hit only when:
-    //   - cache row exists, AND
-    //   - it was produced by rotating the cookie's refresh token (so its
-    //     access_token belongs to the SAME session the user is on now), AND
-    //   - access token still has >30 s of life left.
-    // A stale cache row from a prior session fails the prior_refresh_token
-    // check and falls through to a fresh rDash call.
-    const cacheBelongsToCookieSession =
-      !!cached && cached.prior_refresh_token === payload.refreshToken;
-    if (cached && cacheBelongsToCookieSession && Number(cached.expires_at) > now + 30) {
-      return {
-        kind: "ok",
-        payload: {
-          ...payload,
-          accessToken: cached.access_token,
-          refreshToken: cached.refresh_token,
-          expiresAt: Number(cached.expires_at),
-          refreshExpiresAt: Number(cached.refresh_expires_at),
-        },
-      };
-    }
-
-    // Always refresh using the COOKIE's refresh_token. The cookie reflects
-    // the user's latest known session; the cache might hold a token rDash has
-    // already rotated, which would trip "Refresh token replay detected".
-    const refreshTokenToUse = payload.refreshToken;
-    if (!refreshTokenToUse) {
-      return { kind: "revoked" };
-    }
-
-    const outcome = await callRdashRefresh(refreshTokenToUse);
-    if (outcome.kind === "revoked") {
-      // rDash says this session is dead — drop the cache row so we don't keep
-      // trying. Caller will surface the 401 and the iframe re-handovers.
-      await queryWithClient(client, "DELETE FROM pbe_user_sessions WHERE user_id = $1", [payload.userId]);
-      return { kind: "revoked" };
-    }
-    if (outcome.kind === "transient") {
-      return { kind: "transient" };
-    }
-    if (outcome.kind === "invalid") {
-      // Throwing rolls back the transaction (cache row untouched). The
-      // caller clears the cookie and surfaces AuthError.
-      throw new AuthError(`Refresh response missing ${outcome.missing.join(", ")}`);
-    }
-
-    const newExpires = now + outcome.expiresIn;
-    const newRefreshExpires = now + outcome.refreshExpiresIn;
-    await queryWithClient(
-      client,
-      `INSERT INTO pbe_user_sessions (user_id, access_token, refresh_token, expires_at, refresh_expires_at, prior_refresh_token, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET
-         access_token = EXCLUDED.access_token,
-         refresh_token = EXCLUDED.refresh_token,
-         expires_at = EXCLUDED.expires_at,
-         refresh_expires_at = EXCLUDED.refresh_expires_at,
-         prior_refresh_token = EXCLUDED.prior_refresh_token,
-         updated_at = NOW()`,
-      [payload.userId, outcome.access, outcome.refresh, newExpires, newRefreshExpires, refreshTokenToUse]
-    );
-
-    return {
-      kind: "ok",
-      payload: {
-        ...payload,
-        accessToken: outcome.access,
-        refreshToken: outcome.refresh,
-        expiresAt: newExpires,
-        refreshExpiresAt: newRefreshExpires,
-      },
-    };
-  });
-}
-
-// Force-drop the cached session for a user. Called by /api/session on handover
-// to discard any tokens that belong to the user's prior session — without
-// this the next 401 path would happily hand back the prior session's now-dead
-// tokens from the cache.
-//
-// Two cleanup steps:
-//   1. DB row in pbe_user_sessions — the persistent cache.
-//   2. In-process `refreshInFlight` entries for this user — these hold
-//      already-resolved outcomes from the PRIOR session's refresh attempts
-//      (often `revoked` from a replay detection event). Without this sweep
-//      they'd linger for 5 s and could be returned to the NEW session's
-//      first refresh-on-401, instantly killing the just-handed-over tokens.
-export async function clearSessionCache(userId: string): Promise<void> {
-  if (!userId) return;
-  // Drop any in-flight dedup entries belonging to this user, regardless of
-  // which refresh_token they were keyed against. New post-handover requests
-  // will start their own fresh entry.
-  let inFlightCleared = 0;
-  for (const k of Array.from(refreshInFlight.keys())) {
-    if (k.startsWith(`${userId}:`)) {
-      refreshInFlight.delete(k);
-      inFlightCleared++;
-    }
-  }
-  let dbCleared = 0;
-  try {
-    // pg returns rowCount on the result; reusing `query` returns rows array
-    // so we just count via a SELECT first to keep the log honest. Skipped to
-    // avoid the extra round-trip — best-effort log only.
-    await query("DELETE FROM pbe_user_sessions WHERE user_id = $1", [userId]);
-    dbCleared = 1; // 0 or 1 (PK is user_id)
-  } catch (err) {
-    console.error("[auth/clearSessionCache] failed", { userId, err, ...(await getRequestLogContext()) });
-    return;
-  }
-  console.info("[auth/clearSessionCache] cleared", {
-    userId,
-    inFlightCleared,
-    ...(await getRequestLogContext()),
-    dbCleared,
-  });
-}
-
-// Seed `pbe_user_sessions` with the freshly-issued handover tokens. Without
-// this, the row only exists for users whose access token expires *during*
-// their visit (the lazy refresh path is the only other writer). Short
-// sessions (under ~15 min) never trip a refresh, never get a row, so any
-// "active sessions" audit / RCA query comes back partial.
-//
-// `prior_refresh_token` is NULL because no refresh produced this row — it
-// came from a handover. That intentionally fails the cache-hit check in
-// `refreshTokensLocked`, so the first real refresh attempt still goes to
-// rDash (which is what we want — we have no proof yet that the cached row
-// belongs to the cookie session). After that first refresh, the row gets
-// rewritten with a non-null `prior_refresh_token` and cache hits work
-// normally.
-export async function seedSessionCache(params: {
-  userId: string;
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-  refreshExpiresAt: number;
-}): Promise<void> {
-  const { userId, accessToken, refreshToken, expiresAt, refreshExpiresAt } = params;
-  if (!userId) return;
-  try {
-    await query(
-      `INSERT INTO pbe_user_sessions (user_id, access_token, refresh_token, expires_at, refresh_expires_at, prior_refresh_token, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NULL, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET
-         access_token = EXCLUDED.access_token,
-         refresh_token = EXCLUDED.refresh_token,
-         expires_at = EXCLUDED.expires_at,
-         refresh_expires_at = EXCLUDED.refresh_expires_at,
-         prior_refresh_token = NULL,
-         updated_at = NOW()`,
-      [userId, accessToken, refreshToken, expiresAt, refreshExpiresAt]
-    );
-    console.info("[auth/seedSessionCache] seeded", { userId, expiresAt, refreshExpiresAt, ...(await getRequestLogContext()) });
-  } catch (err) {
-    // Best-effort. A DB write failure here shouldn't block the handover
-    // (the cookie is still set and the user can still load the app).
-    console.error("[auth/seedSessionCache] failed", { userId, err, ...(await getRequestLogContext()) });
-  }
-}
-
-// Public entry point. Reads the current auth cookie, refreshes if needed,
-// updates the cookie (best-effort), and returns the fresh payload. Returns
-// `null` when there is no cookie at all (caller surfaces as 401). Returns
-// `{ kind: "revoked" }` etc. so the caller can decide what to surface.
-//
-// `apiFetch` calls this after an rDash 401. Server components also benefit
-// indirectly: even though they can't set cookies, the DB cache stores the new
-// tokens, so the next route-handler request can pick them up.
-export async function refreshAuthForRequest(): Promise<RefreshOutcome | { kind: "no_cookie" }> {
-  let cookieStore: Awaited<ReturnType<typeof cookies>>;
-  try {
-    cookieStore = await cookies();
-  } catch {
-    return { kind: "no_cookie" };
-  }
-  const cookieValue = cookieStore.get(COOKIE_NAME)?.value;
-  if (!cookieValue) return { kind: "no_cookie" };
-  let payload: AuthPayload;
-  try {
-    payload = await decrypt(cookieValue);
-  } catch {
-    return { kind: "no_cookie" };
-  }
-  payload = normalizePayloadIds(payload);
-  if (!payload.userId) return { kind: "revoked" };
-
-  // Dedup key MUST include the refresh_token, not just userId. Two scenarios
-  // require this:
-  //   1. Handover (e.g. org switch) replaces the cookie's tokens but the
-  //      userId stays the same. A previously cached outcome (revoked from
-  //      the OLD refresh_token) would otherwise be returned for the NEW
-  //      session's first refresh attempt, immediately killing it.
-  //   2. Normal rotation — every successful refresh produces a new
-  //      refresh_token, and we want the next refresh attempt to start fresh
-  //      rather than re-using the (now-resolved) prior promise.
-  // The map naturally orphans stale entries when the refresh_token changes;
-  // they get cleaned by the 5 s sweep below.
-  const key = `${payload.userId}:${payload.refreshToken}`;
-  const existing = refreshInFlight.get(key);
-  const outcomePromise = existing ?? refreshTokensLocked(payload).finally(() => {
-    // Hold the dedup window slightly past the call so a flurry of 401s on
-    // the SAME refresh_token collapse onto one outcome.
-    setTimeout(() => refreshInFlight.delete(key), 5000);
-  });
-  if (!existing) refreshInFlight.set(key, outcomePromise);
-  let outcome: RefreshOutcome;
-  try {
-    outcome = await outcomePromise;
-  } catch (err) {
-    if (err instanceof AuthError) {
-      // Incomplete refresh response: the session can't continue. Clear the
-      // cookie (both variants) so the iframe re-handovers.
-      console.warn("[auth/refresh] refresh failed, clearing cookie", { reason: err.message });
-      queueAuthCookie("", 0);
-    }
-    throw err;
-  }
-
-  if (outcome.kind === "ok") {
-    // Queue the rotated cookie; withAuthCookies writes it to the route's
-    // response both Partitioned and unpartitioned (same as setAuthCookie).
-    // Server components have no response; the DB cache keeps the rest of the
-    // flow coherent there.
-    const encrypted = await encrypt(outcome.payload);
-    const maxAge = Math.max(0, outcome.payload.refreshExpiresAt - Math.floor(Date.now() / 1000));
-    queueAuthCookie(encrypted, maxAge);
-  } else if (outcome.kind === "revoked") {
-    // Fix D: clear the cookie when rDash tells us the session is dead.
-    // Without this, every subsequent request from a stale tab (e.g. one
-    // left open across a parent-side logout) loops through refresh →
-    // revoked → refresh on the same dead refresh_token, racking up 4-second
-    // rDash timeouts per call. Clearing the cookie ensures the *next*
-    // request from that tab arrives with no cookie at all → fast 401 from
-    // getAuth → the iframe knows to re-handover (or, for stale tabs, show
-    // a session-expired error).
-    //
-    // Cleared through the same sink, so both partition variants go.
-    console.warn("[auth/refresh] revoked outcome, clearing cookie", await getRequestLogContext(payload));
-    queueAuthCookie("", 0);
-  } else if (outcome.kind === "transient") {
-    // Transient rDash failure (timeout, 5xx). Cookie is preserved; caller
-    // surfaces the error and the next request retries. Log so we can spot
-    // rDash outages by their PBE-side fingerprint.
-    console.warn("[auth/refresh] transient outcome", await getRequestLogContext(payload));
-  }
-  return outcome;
-}
-
-// Best-effort read of the existing auth cookie off a NextRequest. Used by
-// /api/session to recover the prior payload (specifically `lastPath`) before
-// overwriting it with the post-handover cookie. Returns null on missing or
-// invalid cookies — the caller treats that as "no prior path to preserve".
-export async function readAuthCookieFromRequest(request: NextRequest): Promise<AuthPayload | null> {
-  const value = request.cookies.get(COOKIE_NAME)?.value;
-  if (!value) return null;
-  try {
-    const payload = await decrypt(value);
-    // Normalize legacy hashid IDs so callers can compare against the
-    // post-decode values written to new cookies without spurious mismatches.
-    return normalizePayloadIds(payload);
-  } catch {
-    return null;
-  }
-}
-
-// ── Consume handover code ───────────────────────────────────
 export async function consumeHandoverCode(code: string): Promise<{
   accessToken: string;
-  refreshToken: string;
   expiresIn: number;
-  refreshExpiresIn: number;
   user: { id: string; display_name: string; email: string | null };
   org: { id: string; name: string; type: string };
   // rDash `app_slug`; null when absent. /api/session compares it with
@@ -1059,31 +618,31 @@ export async function consumeHandoverCode(code: string): Promise<{
 
   const json = await res.json();
   const data = json.data || json;
-  // Drift check (handover side): log claims on the very first access token
-  // rDash issues for this session. Pair this with the [auth/refresh] log to
-  // see whether admin claims survive the refresh or get dropped.
+  // Drift check: log claims on the access token rDash issued for this
+  // session (diagnostic only).
   console.log(
     "[auth] consume access token claims",
     summariseClaims(peekAccessTokenClaims(data.access_token)),
     await getRequestLogContext(),
   );
-  // Token lifetimes are required — never defaulted. Email is optional.
-  // TODO(verify): consume always returns expires_in / refresh_token_expires_in;
-  // user.email may be absent (docs/api-notes.md → #6, #7).
+  // The access-token lifetime is required — never defaulted (the cookie
+  // lives exactly that long). The refresh token is ignored: PBE never
+  // refreshes. Email is optional.
+  // TODO(verify): consume always returns expires_in; its value (access token
+  // lifetime) is still to be confirmed; user.email may be absent
+  // (docs/api-notes.md → #6, #7).
   const expiresIn = positiveSeconds(data.expires_in);
-  const refreshExpiresIn = positiveSeconds(data.refresh_token_expires_in);
-  if (expiresIn === null || refreshExpiresIn === null) {
-    console.error("[auth] consume response missing token lifetimes", {
-      expires_in: expiresIn !== null,
-      refresh_token_expires_in: refreshExpiresIn !== null,
-    });
-    throw new AuthError("Handover response missing token lifetimes");
+  if (expiresIn === null) {
+    console.error("[auth] consume response missing expires_in");
+    throw new AuthError("Handover response missing expires_in");
+  }
+  if (typeof data.access_token !== "string" || !data.access_token) {
+    console.error("[auth] consume response missing access_token");
+    throw new AuthError("Handover response missing access_token");
   }
   return {
     accessToken: data.access_token,
-    refreshToken: data.refresh_token,
     expiresIn,
-    refreshExpiresIn,
     user: {
       ...data.user,
       email: typeof data.user?.email === "string" && data.user.email ? data.user.email : null,
@@ -1111,7 +670,7 @@ const MOCK_AUTH: AuthContext = {
 };
 
 // DEV static-token session (RDASH_AUTH_MODE=static_token, never production —
-// runtime-config enforces it). No handover, no cookie, no refresh. The vendor
+// runtime-config enforces it). No handover, no cookie. The vendor
 // is RDASH_DEV_VENDOR_ID exactly as given (rDash's own hashid — no PBE-salt
 // decode). The token is never logged.
 function devStaticSession(): AuthContext {
@@ -1148,5 +707,15 @@ export class AuthError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AuthError";
+  }
+}
+
+/** The access token expired (cookie clock) or rDash answered 401. Mapped to
+ *  401 { error: "session_expired" } + cookie cleared; the browser gets a
+ *  fresh handover. The rDash call is never retried with another token. */
+export class SessionExpiredError extends AuthError {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SessionExpiredError";
   }
 }

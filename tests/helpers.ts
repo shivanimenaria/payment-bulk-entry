@@ -14,9 +14,7 @@ export async function makeSessionCookie(overrides: Record<string, unknown> = {})
   const now = Math.floor(Date.now() / 1000);
   return new EncryptJWT({
     accessToken: "test-access",
-    refreshToken: "test-refresh",
     expiresAt: now + 900,
-    refreshExpiresAt: now + 3600,
     orgId: "11",
     projectId: "22",
     userId: "7",

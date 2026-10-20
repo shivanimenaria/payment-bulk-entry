@@ -15,8 +15,8 @@ import type { RdashSource } from "./types";
 
 // RDASH_DATA_SOURCE=real. Every call uses the logged-in user's access token,
 // so rDash CAN_* permissions apply and entries are attributed to that user.
-// Lazy refresh-on-401 happens inside apiFetch / paginateRdash; routes using
-// this source must be wrapped in withAuthCookies (enforced by a test).
+// No refresh: an rDash 401 throws SessionExpiredError inside apiFetch /
+// paginateRdash (route → 401 session_expired → browser re-handover).
 //
 // Ids from rDash (project ids, payment_request_id) are passed back unchanged.
 // Only the session vendor id (stored decoded) is re-encoded for the query —
