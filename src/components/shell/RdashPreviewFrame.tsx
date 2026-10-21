@@ -64,9 +64,9 @@ export function RdashPreviewFrame({ children }: { children: React.ReactNode }) {
   if (dataSource !== "mock") return <>{children}</>;
 
   return (
-    <div data-rdash-preview-frame="" className="flex min-h-screen bg-rd-page">
+    <div data-rdash-preview-frame="" className="flex min-h-0 flex-1 overflow-hidden bg-rd-page">
       {/* Left icon sidebar (static) */}
-      <aside aria-hidden="true" className="flex min-h-screen w-[72px] shrink-0 flex-col items-center self-stretch border-r border-rd-border bg-white">
+      <aside aria-hidden="true" className="flex h-full w-[72px] shrink-0 flex-col items-center self-stretch overflow-hidden border-r border-rd-border bg-white">
         <div className="flex h-[58px] items-center">
           <RdashLogo />
         </div>
@@ -86,8 +86,8 @@ export function RdashPreviewFrame({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div aria-hidden="true">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div aria-hidden="true" className="shrink-0">
           {/* Header: breadcrumb + icons + user pill */}
           <header className="flex h-[58px] items-center justify-between border-b border-rd-border bg-white px-5">
             <p className="truncate text-rd-black">
@@ -129,7 +129,7 @@ export function RdashPreviewFrame({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         {/* The PBE page = what the iframe shows in real mode */}
-        <div className="min-w-0 flex-1">{children}</div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
       </div>
     </div>
   );

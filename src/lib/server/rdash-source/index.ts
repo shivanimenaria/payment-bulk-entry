@@ -1,6 +1,5 @@
 import "server-only";
 import { getDataSource, type DataSource } from "./mode";
-import { resolveAuthMode } from "@/lib/runtime-config";
 import type { RdashSource } from "./types";
 import { createMockSource } from "./mock";
 import { createRealSource } from "./real";
@@ -16,5 +15,5 @@ export function getRdashSource(auth: { accessToken: string }): RdashSource {
   const mode = getDataSource();
   if (mode === "mock") return createMockSource();
   // DEV static-token mode: ids are rDash's own (RDASH_DEV_VENDOR_ID), sent as-is.
-  return createRealSource(auth.accessToken, { rawVendorId: resolveAuthMode(process.env) === "static_token" });
+  return createRealSource(auth.accessToken);
 }

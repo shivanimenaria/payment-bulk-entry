@@ -6,14 +6,35 @@ import { useSession } from "@/lib/auth-context";
 // tabs and currency above the iframe, so there is no page title. The MOCK DATA
 // badge lives in the mock-only preview frame (RdashPreviewFrame). A session
 // error is surfaced as a banner (no silent fallback).
-export function PageHeader({ actions }: { actions?: React.ReactNode }) {
+// `left`: optional content on the left. `bannerOnly`: only the session error
+// banner (pages with their own header, e.g. /payments/new's Create header,
+// which shows the DEV badge itself).
+export function PageHeader({
+  actions,
+  left,
+  bannerOnly = false,
+}: {
+  actions?: React.ReactNode;
+  left?: React.ReactNode;
+  bannerOnly?: boolean;
+}) {
   const { error, authMode } = useSession();
-  const dev = authMode === "static_token";
-  if (!actions && !error && !dev) return null;
+  const dev = authMode === "static_token" && !bannerOnly;
+  if (bannerOnly) {
+    return error ? (
+      <div className="shrink-0 px-6 pt-5">
+        <div role="alert" className="rounded-rd border border-rd-border bg-white p-[15px] text-[14px] font-semibold text-rd-red">
+          Your session could not be verified. Reopen Bulk Payment from the vendor&apos;s Vendor Payments page in rDash.
+        </div>
+      </div>
+    ) : null;
+  }
+  if (!actions && !left && !error && !dev) return null;
   return (
-    <div className="px-5 pt-5">
-      {actions || dev ? (
+    <div className="shrink-0 px-5 pt-5">
+      {actions || left || dev ? (
         <div className="flex items-center justify-end gap-3">
+          {left ? <div className="mr-auto">{left}</div> : null}
           {actions}
           {dev ? (
             <span

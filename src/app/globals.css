@@ -89,6 +89,13 @@
     @apply border-border;
   }
 
+  /* The app fills exactly the viewport / iframe: no page-level vertical
+     scroll — only the payment-request rows scroll (TableBox). */
+  html,
+  body {
+    height: 100%;
+  }
+
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-stack);

@@ -3,7 +3,6 @@ import { validateAllocation, validateSubmission, MESSAGES } from "@/lib/payments
 import { computeTotals } from "@/lib/payments/totals";
 import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
 import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
-import { buildRetryEntries, buildRetryRequest, RetryMismatchError } from "@/lib/payments/retry";
 import { userUnits, unitsToDecimalString } from "@/lib/payments/money";
 
 /** Exact money units (0.0001) — BigInt literals need an ES2020 target. */
@@ -119,7 +118,7 @@ describe("validateAllocation (client)", () => {
     expect(r.errors.rows).toEqual({ 0: { amount: MESSAGES.detailsUnavailable }, 1: { amount: MESSAGES.detailsError } });
   });
 
-  it("a failed (rowError) row keeps its amount and still validates — needed for Retry failed", () => {
+  it("a failed (rowError) row keeps its amount and still validates", () => {
     const r = validateAllocation(header("10"), [row("a", 100, "10", { rowStatus: "failed", rowError: "Rejected" })]);
     expect(r.ok).toBe(true);
   });
@@ -180,65 +179,6 @@ describe("build-payload", () => {
     const server = validateSubmission(request, rows.map((r) => r.config));
     if (!server.ok) throw new Error(server.summary.join("; "));
     expect(buildBulkEntries(server.value)).toEqual(buildBulkEntries(client.value));
-  });
-});
-
-describe("retry", () => {
-  const previous = {
-    header: header("150"),
-    rows: [
-      { payment_request_id: "a", amount: "100", remark: null },
-      { payment_request_id: "b", amount: "30.25", remark: "r" },
-      { payment_request_id: "c", amount: "19.75", remark: null },
-    ],
-  };
-  const result: BulkSubmitResult = {
-    count: 1,
-    created: [{ id: "e1", payment_request_id: "a" }],
-    failed: [
-      { payment_request_id: "b", error: "x" },
-      { payment_request_id: "c", error: "y" },
-    ],
-    recordedAmount: "100",
-    notRecordedAmount: "50",
-  };
-
-  it("retries only ids in failed[]; Amount Paid = not-recorded amount", () => {
-    const req = buildRetryRequest(result, previous);
-    expect(req.rows.map((r) => r.payment_request_id)).toEqual(["b", "c"]);
-    expect(req.header.amountPaid).toBe("50");
-    expect(req.header.paymentMode).toBe("cheque");
-  });
-
-  it("never resends ids missing from both created and failed", () => {
-    const partial: BulkSubmitResult = { ...result, failed: [{ payment_request_id: "b", error: "x" }] }; // "c" in neither
-    const entries = buildRetryEntries(
-      partial,
-      previous.rows.map((r) => ({
-        payment_request_id: r.payment_request_id,
-        amount: Number(r.amount),
-        payment_mode: "cheque" as const,
-        payment_date: "2026-10-15",
-        transaction_id: null,
-        transaction_proof_file_url: null,
-        transaction_proof_file_name: null,
-        remark: r.remark,
-      })),
-    );
-    expect(entries.map((e) => e.payment_request_id)).toEqual(["b"]);
-    expect(buildRetryRequest(partial, previous).rows.map((r) => r.payment_request_id)).toEqual(["b"]);
-  });
-
-  it("a failed id that wasn't submitted → RetryMismatchError", () => {
-    expect(() =>
-      buildRetryRequest({ ...result, failed: [{ payment_request_id: "zzz", error: "x" }] }, previous),
-    ).toThrow(RetryMismatchError);
-  });
-
-  it("the retry request passes server validation against the refreshed due", () => {
-    const req = buildRetryRequest(result, previous);
-    const server = validateSubmission(req, [cfg("b", 30.25), cfg("c", 19.75)]);
-    expect(server.ok).toBe(true);
   });
 });
 
@@ -327,43 +267,6 @@ describe("submit flow helpers", () => {
   });
 });
 
-describe("Remove a failed row", () => {
-  it("dismissFailedRow: clears amount + rowError, unlocks, keeps remark; non-failed rows untouched", async () => {
-    const { dismissFailedRow, isAmountEditable } = await import("@/lib/payments/allocation");
-    const failed = row("a", 100, "40", { rowStatus: "failed", rowError: "Rejected", remark: "keep me", remarkOverridden: true });
-    expect(isAmountEditable(failed)).toBe(false);
-    const out = dismissFailedRow(failed);
-    expect(out).toMatchObject({ amount: "", rowError: null, rowStatus: "idle", remark: "keep me", remarkOverridden: true });
-    expect(isAmountEditable(out)).toBe(true);
-    const ok = row("b", 100, "10");
-    expect(dismissFailedRow(ok)).toBe(ok);
-  });
-
-  it("removeFailedId: Retry failed no longer includes the removed id; Amount paid follows what's left", async () => {
-    const { removeFailedId, retryAmountPaid } = await import("@/lib/payments/retry");
-    const previous = {
-      header: header("85"),
-      rows: [
-        { payment_request_id: "a", amount: "40", remark: null },
-        { payment_request_id: "b", amount: "45", remark: null },
-      ],
-    };
-    const result: BulkSubmitResult = {
-      count: 0,
-      created: [],
-      failed: [{ payment_request_id: "a", error: "x" }, { payment_request_id: "b", error: "y" }],
-      recordedAmount: "0",
-      notRecordedAmount: "85",
-    };
-    const afterA = removeFailedId(result, "a");
-    expect(buildRetryRequest(afterA, previous).rows.map((r) => r.payment_request_id)).toEqual(["b"]);
-    expect(retryAmountPaid(afterA, previous)).toBe("45");
-    expect(afterA.notRecordedAmount).toBe("85"); // reported outcome unchanged
-    const none = removeFailedId(afterA, "b");
-    expect(buildRetryRequest(none, previous).rows).toEqual([]);
-    expect(retryAmountPaid(none, previous)).toBe("");
-  });
-});
 
 describe("payable rule (lib/payments/payable.ts)", () => {
   it("exact lowercase statuses only; missing / other / differently-cased → not payable", async () => {

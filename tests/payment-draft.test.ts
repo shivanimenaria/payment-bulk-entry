@@ -12,8 +12,9 @@ import {
 import type { AllocationRow, PaymentHeader } from "@/types/payments";
 import type { VendorPaymentRequestConfigItem } from "@/types/rdash";
 
-// Unsaved New Payment form across a re-handover: saved before leaving,
-// restored once into rows that still exist, then deleted.
+// Unsaved Create Payment state (form + table amounts / remarks + page)
+// across a re-handover: saved before leaving, restored once into rows that
+// still exist, then deleted.
 
 const INR = { id: "cur-inr", name: "Indian National Rupee", symbol: "₹", code: "INR", locale: "en-IN" };
 function cfg(id: string, due: string): VendorPaymentRequestConfigItem {
@@ -58,12 +59,12 @@ class MemoryStorage {
 }
 
 describe("buildDraft", () => {
-  it("keeps header + rows with an amount or their own remark, keyed by payment_request_id", () => {
+  it("keeps the form + rows with an amount or their own remark (by payment_request_id) + the page", () => {
     const d = buildDraft("v1", "INR", HEADER, [
       row("a", "100", { amount: "100", remark: "Oct" }),
       row("b", "100", { remark: "own", remarkOverridden: true }),
       row("c", "100", { remark: "Oct" }),
-    ])!;
+    ], 2)!;
     expect(d).toEqual({
       vendorId: "v1",
       currency: "INR",
@@ -72,7 +73,27 @@ describe("buildDraft", () => {
         { payment_request_id: "a", amount: "100", remark: "Oct", remarkOverridden: false },
         { payment_request_id: "b", amount: "", remark: "own", remarkOverridden: true },
       ],
+      page: 2,
     });
+  });
+
+  it("form alone is kept (no amounts yet); round-trip through storage", () => {
+    const d = buildDraft("v1", "INR", HEADER, [row("a")])!;
+    expect(d).toEqual({ vendorId: "v1", currency: "INR", header: HEADER, rows: [], page: 1 });
+    const s = new MemoryStorage();
+    saveDraft(s, d);
+    expect(takeDraft(s, "v1")).toEqual(d);
+  });
+
+  it("an invalid page falls back to 1; a stored invalid page is rejected", () => {
+    expect(buildDraft("v1", "INR", HEADER, [], 0)!.page).toBe(1);
+    expect(buildDraft("v1", "INR", HEADER, [], 2.5)!.page).toBe(1);
+    expect(parseDraft({ vendorId: "v1", currency: "INR", header: HEADER, rows: [], page: 0 })).toBeNull();
+  });
+
+  it("older draft shapes (details / modalOpen, no page) are discarded", () => {
+    expect(parseDraft({ vendorId: "v1", currency: "INR", details: HEADER, rows: [] })).toBeNull();
+    expect(parseDraft({ vendorId: "v1", currency: "INR", header: HEADER, rows: [], modalOpen: true })).toBeNull();
   });
 
   it("nothing entered → null (nothing saved); no vendor → null", () => {
@@ -91,9 +112,10 @@ describe("applyDraftRows", () => {
       { payment_request_id: "b", amount: "50", remark: "own", remarkOverridden: true },
       { payment_request_id: "gone", amount: "999", remark: "x", remarkOverridden: true },
     ],
+    page: 1,
   };
 
-  it("restores only into rows that still exist; header remark goes to the rest", () => {
+  it("restores only into rows that still exist; the header Remark goes to the rest", () => {
     const out = applyDraftRows([row("a"), row("b"), row("new")], draft);
     expect(out.map((r) => r.config.payment_request_id)).toEqual(["a", "b", "new"]);
     expect(out[0]).toMatchObject({ amount: "100", remark: "Oct", remarkOverridden: false });

@@ -97,3 +97,70 @@ export function sentAmounts(request: BulkSubmitRequest): Map<string, Units> {
   }
   return out;
 }
+
+export interface FailedPaymentLine {
+  paymentRequestId: string;
+  requestId: string;
+  projectName: string;
+  /** Amount that was sent for this request (exact units; null if unparseable). */
+  amountUnits: Units | null;
+  /** rDash's per-entry error (bulk `failed[].error`). */
+  error: string;
+}
+
+/** "Some payments could not be recorded" popup: ONLY the failed entries, in
+ *  rDash's order, labelled from the loaded rows. */
+export function failedPaymentLines(
+  result: Pick<BulkSubmitResult, "failed">,
+  request: BulkSubmitRequest,
+  rows: Pick<AllocationRow, "config" | "details" | "projectName">[],
+): FailedPaymentLine[] {
+  const amounts = sentAmounts(request);
+  const byId = new Map(rows.map((r) => [r.config.payment_request_id, r]));
+  return result.failed.map((f) => {
+    const row = byId.get(f.payment_request_id);
+    return {
+      paymentRequestId: f.payment_request_id,
+      requestId: row?.details?.request_number || "—",
+      projectName: row?.projectName || "—",
+      amountUnits: amounts.get(f.payment_request_id) ?? null,
+      error: typeof f.error === "string" && f.error ? f.error : "—",
+    };
+  });
+}
+
+// ── Result popups after Submit (rDash success / warning prompts) ──
+
+export interface PaymentTally {
+  count: number;
+  /** Exact units; null when the route's decimal string is unparseable. */
+  amountUnits: Units | null;
+}
+
+/** What the Create Payment page shows after a bulk response it leaves on:
+ *  every entry created → success prompt; some failed → partial prompt;
+ *  502 / unexpected body → "could not confirm" prompt. */
+export type SubmitPrompt =
+  | { kind: "success"; recorded: PaymentTally; header: Pick<BulkSubmitRequest["header"], "paymentDate" | "paymentMode" | "reference"> }
+  | { kind: "partial"; recorded: PaymentTally; notRecorded: PaymentTally; lines: FailedPaymentLine[] }
+  | { kind: "unconfirmed" };
+
+/** Prompt for a 200 bulk result (counts from created[] / failed[], amounts
+ *  from the route's exact recorded / not-recorded strings). */
+export function submitPromptFor(
+  result: BulkSubmitResult,
+  request: BulkSubmitRequest,
+  rows: Pick<AllocationRow, "config" | "details" | "projectName">[],
+): SubmitPrompt {
+  const recorded = { count: result.created.length, amountUnits: decimalUnits(result.recordedAmount) };
+  if (result.failed.length === 0) {
+    const { paymentDate, paymentMode, reference } = request.header;
+    return { kind: "success", recorded, header: { paymentDate, paymentMode, reference } };
+  }
+  return {
+    kind: "partial",
+    recorded,
+    notRecorded: { count: result.failed.length, amountUnits: decimalUnits(result.notRecordedAmount) },
+    lines: failedPaymentLines(result, request, rows),
+  };
+}

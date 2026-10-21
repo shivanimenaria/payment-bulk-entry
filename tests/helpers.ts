@@ -3,11 +3,9 @@ import { randomBytes } from "node:crypto";
 
 // Throwaway per-run secret — never a real one.
 export const TEST_COOKIE_SECRET = randomBytes(32).toString("hex");
-export const TEST_SALT = "pbe-test-salt";
 
 export function setAuthEnv() {
   process.env.COOKIE_SECRET = TEST_COOKIE_SECRET;
-  process.env.EMBEDDED_APPS_HASH_ID_SALT_PBE = TEST_SALT;
 }
 
 export async function makeSessionCookie(overrides: Record<string, unknown> = {}): Promise<string> {

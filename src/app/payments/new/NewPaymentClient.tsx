@@ -1,71 +1,65 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shell/PageHeader";
-import { rdButtonOutline, rdButtonPrimary, rdCard, rdTextLink } from "@/components/rd/styles";
+import { CurrencyFilter } from "@/components/rd/CurrencyFilter";
+import { rdTextLink } from "@/components/rd/styles";
 import { useUI } from "@/components/ui/toast-confirm";
 import { apiFetch, onBeforeRehandover } from "@/lib/api-fetch";
 import { useSession } from "@/lib/auth-context";
-import { validateAllocation } from "@/lib/payments/validation";
+import { validateAllocation, validateHeader } from "@/lib/payments/validation";
 import { computeTotals } from "@/lib/payments/totals";
-import {
-  listCurrencies,
-  resolveSelectedCurrency,
-  rowsForCurrency,
-  rowsWithoutCurrency,
-} from "@/lib/payments/currency";
-import { CurrencyFilter } from "@/components/rd/CurrencyFilter";
+import { listCurrencies, resolveSelectedCurrency } from "@/lib/payments/currency";
 import { applyHeaderRemark, setRowRemark } from "@/lib/payments/remarks";
-import { clearAppliedAmounts, dismissFailedRow, payInFull, setRowAmount } from "@/lib/payments/allocation";
+import {
+  autoAllocate,
+  autoAllocatePaidUnits,
+  clearAppliedAmounts,
+  hasReplaceableAmounts,
+  payInFull,
+  setRowAmount,
+} from "@/lib/payments/allocation";
 import { buildBulkEntries, buildSubmitRequest } from "@/lib/payments/build-payload";
-import { buildRetryEntries, buildRetryRequest, removeFailedId, retryAmountPaid } from "@/lib/payments/retry";
 import { applyDraftRows, buildDraft, clearDraft, saveDraft, takeDraft } from "@/lib/payments/draft";
+import {
+  EMPTY_HEADER,
+  PAYMENTS_PATH,
+  formLevelMessage,
+  hasEnteredAnything,
+  visibleFieldErrors,
+  withCurrency,
+  type SubmitOutcome,
+} from "@/lib/payments/payment-form";
 import {
   isBulkSubmitResult,
   isValidationRejection,
   mapServerRowErrors,
   mergeRowsAfterSubmit,
-  sentAmounts,
+  submitPromptFor,
+  type SubmitPrompt as SubmitPromptState,
 } from "@/lib/payments/submit";
 import type { BulkPaymentEntryInput } from "@/types/rdash";
-import type {
-  AllocationRow,
-  BulkSubmitRequest,
-  BulkSubmitResult,
-  PaymentHeader as PaymentHeaderValue,
-} from "@/types/payments";
-import { PaymentHeader } from "./components/PaymentHeader";
-import { SummaryCards } from "./components/SummaryCards";
-import { AllocationTable, TableBox, TableSkeleton } from "./components/AllocationTable";
-import { EmptyState, LoadError } from "./components/EmptyState";
-import { ValidationList } from "./components/ValidationList";
-import { PayloadPreview } from "./components/PayloadPreview";
-import { SubmitResult, type SubmitOutcome } from "./components/SubmitResult";
+import type { AllocationRow, BulkSubmitRequest, PaymentHeader as PaymentHeaderValue } from "@/types/payments";
+import { CreatePaymentForm } from "../components/CreatePaymentForm";
+import { CreatePageHeader } from "../components/CreatePageHeader";
+import { AllocationTable, TableBox, TablePagination, TableSkeleton } from "../components/AllocationTable";
+import { useFilteredPaging } from "../useFilteredPaging";
+import { EmptyState, LoadError } from "../components/EmptyState";
+import { PayloadPreviewLink } from "../components/PayloadPreview";
+import { SubmitPrompt } from "../components/SubmitPrompt";
+import { errorText, fetchRows, usePaymentRequests } from "../usePaymentRequests";
 
-type LoadState = { status: "loading" } | { status: "error"; message: string } | { status: "ready" };
-
-/** What was sent, kept for the payload preview and Retry failed. */
+/** What will be / was sent (mock payload preview). */
 interface Sent {
   request: BulkSubmitRequest;
   entries: BulkPaymentEntryInput[];
 }
 
-const EMPTY_HEADER: PaymentHeaderValue = {
-  amountPaid: "",
-  paymentDate: "",
-  paymentMode: null,
-  reference: "",
-  remark: "",
-};
-
 const BULK_URL = "/api/rdash/payment-entries/bulk";
-const LOAD_ERROR = "Could not load payment requests. Please try again.";
 const SUBMIT_UNKNOWN =
   "Could not confirm whether the payments were recorded. Check Payment Entries in rDash before submitting again.";
 const REFRESH_ERROR = "Payments were submitted, but the table could not be refreshed.";
-const SESSION_EXPIRED_TEXT = "Your session expired. Signing in again…";
 
 // sessionStorage for the unsaved-form draft; null when the browser blocks it.
 function draftStorage(): Storage | null {
@@ -76,113 +70,92 @@ function draftStorage(): Storage | null {
   }
 }
 
-const errorText = (body: unknown, fallback: string): string =>
-  body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
-    ? (body as { error: string }).error
-    : fallback;
-
-async function fetchRows(): Promise<{ ok: true; rows: AllocationRow[] } | { ok: false; message: string }> {
-  try {
-    const res = await apiFetch("/api/rdash/payment-requests", { cache: "no-store" });
-    // 401: apiFetch is already navigating to a fresh handover.
-    if (res.status === 401) return { ok: false, message: SESSION_EXPIRED_TEXT };
-    const body: unknown = await res.json().catch(() => null);
-    if (!res.ok) return { ok: false, message: errorText(body, LOAD_ERROR) };
-    const list = body && typeof body === "object" ? (body as { rows?: unknown }).rows : undefined;
-    if (!Array.isArray(list)) {
-      console.error("[new-payment] unexpected /api/rdash/payment-requests body");
-      return { ok: false, message: LOAD_ERROR };
-    }
-    return { ok: true, rows: list as AllocationRow[] };
-  } catch (err) {
-    console.error("[new-payment] load failed", err);
-    return { ok: false, message: LOAD_ERROR };
-  }
-}
-
-// /payments/new — header, summary, allocation table, live validation, submit.
-// Every calculation / rule comes from lib/payments; this component only
-// holds state and wires events.
+// /payments/new — page 2, "Create Payment", laid out like the RFQ "Create
+// RFQ" page (docs/ui-reference/rfq-create): header "← Create Payment" with
+// Cancel + Submit; the payment form card (Amount Paid, Payment Date, Payment
+// Mode, Reference / UTR, Remark, live Allocated / Excess, Total Due line);
+// then the allocation table (Payment Done, Pay in full, Remarks; filters,
+// paging). Submit validates (existing client validation) and calls the bulk
+// API directly. Then an rDash result prompt (components/SubmitPrompt.tsx):
+// all recorded → success; some failed → partial (failed rows); 502 →
+// "could not confirm"; OK → /payments (reloaded). 400 / 403 / network →
+// stay, nothing cleared.
+// Every calculation / rule comes from lib/payments; this component only holds
+// state and wires events.
 export function NewPaymentClient() {
   const router = useRouter();
   const { buildUrl, dataSource, vendorId } = useSession();
   const { confirm } = useUI();
 
+  // Payment form (the header of every entry).
   const [header, setHeader] = useState<PaymentHeaderValue>(EMPTY_HEADER);
-  const [rows, setRows] = useState<AllocationRow[]>([]);
-  // Currency filter: the user's explicit pick (code). The effective selection
-  // is derived during render (resolveSelectedCurrency): their pick if it still
-  // exists, else the only currency, else none — never guessed.
-  const [pickedCurrency, setSelectedCurrency] = useState<string | null>(null);
-  const [load, setLoad] = useState<LoadState>({ status: "loading" });
-  const [dirty, setDirty] = useState(false);
-  // Header fields the user has edited: their inline errors show; the live
-  // list under the table shows everything once the form is dirty.
-  const [touched, setTouched] = useState<Set<keyof PaymentHeaderValue>>(() => new Set());
+  // Fields the user has edited (their errors show) / Submit pressed (all show).
+  // Latest header remark for rows arriving after it was set.
+  const headerRemarkRef = useRef(header.remark);
+  headerRemarkRef.current = header.remark;
+  const data = usePaymentRequests({ prepare: (rs) => applyHeaderRemark(rs, headerRemarkRef.current) });
+  const { rows, setRows, load, visibleRows, selectedOption, selectedCurrency, currencyOptions, needsCurrencyPick, noCurrencyCount } = data;
+  const [attempted, setAttempted] = useState(false);
 
   // ── Submit state ──
   // Single-flight: the ref blocks a second submit before React re-renders;
   // `submitting` drives the disabled button + spinner.
   const inFlightRef = useRef(false);
-  const [submitting, setSubmitting] = useState<"submit" | "retry" | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  // 400 / 403 / network errors (stay on page 2; one red line in the form
+  // card footer, row / field errors inline).
   const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
-  // The request that produced the current partial result (for Retry failed).
-  const [resultSent, setResultSent] = useState<{ sent: Sent; result: BulkSubmitResult } | null>(null);
+  // Result prompt after a bulk response (success / partial / unconfirmed)
+  // → OK → /payments.
+  const [prompt, setPrompt] = useState<SubmitPromptState | null>(null);
   const [lastSent, setLastSent] = useState<Sent | null>(null);
   const [serverRowErrors, setServerRowErrors] = useState<Record<number, string>>({});
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  // Failed ids the user removed (shown as "Removed" in the result panel).
-  const [removedIds, setRemovedIds] = useState<Set<string>>(() => new Set());
+  // Field errors from a server 400 (shown under the fields, client first).
+  const [serverHeaderErrors, setServerHeaderErrors] = useState<Record<string, string>>({});
 
-  // Latest header remark for rows arriving after the user typed one.
-  const headerRemarkRef = useRef(header.remark);
-  headerRemarkRef.current = header.remark;
+  const goToList = () => router.push(buildUrl(withCurrency(PAYMENTS_PATH, selectedCurrency)));
 
-  const loadRows = useCallback(async () => {
-    setLoad({ status: "loading" });
-    const r = await fetchRows();
-    if (!r.ok) {
-      setLoad({ status: "error", message: r.message });
-      return;
-    }
-    setRows(applyHeaderRemark(r.rows, headerRemarkRef.current));
-    setLoad({ status: "ready" });
-  }, []);
-
-  useEffect(() => {
-    void loadRows();
-  }, [loadRows]);
-
-  // Currency rules live in lib/payments/currency.ts. Everything below the
-  // filter (table, totals, validation, submit) uses ONLY the rows of the
-  // selected currency.
-  const currencyOptions = useMemo(() => listCurrencies(rows), [rows]);
-  const selectedCurrency = resolveSelectedCurrency(currencyOptions, pickedCurrency);
-  const selectedOption = currencyOptions.find((o) => o.code === selectedCurrency) ?? null;
-  const visibleRows = useMemo(() => rowsForCurrency(rows, selectedCurrency), [rows, selectedCurrency]);
-  const noCurrencyCount = useMemo(() => rowsWithoutCurrency(rows), [rows]);
-  const needsCurrencyPick = load.status === "ready" && currencyOptions.length > 0 && !selectedOption;
   const totals = useMemo(() => computeTotals(header.amountPaid, visibleRows), [header.amountPaid, visibleRows]);
   const currency = useMemo(() => ({ symbol: selectedOption?.symbol || null, mixed: false }), [selectedOption]);
   const validation = useMemo(() => validateAllocation(header, visibleRows), [header, visibleRows]);
+  const entered = hasEnteredAnything(header, rows);
+  const fieldErrors = visibleFieldErrors({ ...serverHeaderErrors, ...validateHeader(header).errors }, attempted);
+
+  // Row errors show only after Submit (then live). Client errors first; a
+  // server 400 message shows on rows the client considers valid.
+  const rowErrors = useMemo(() => {
+    const out: Record<number, Record<string, string>> = {};
+    if (!attempted) return out;
+    for (const [i, msg] of Object.entries(serverRowErrors)) out[Number(i)] = { amount: msg };
+    for (const [i, fields] of Object.entries(validation.errors.rows)) out[Number(i)] = fields;
+    return out;
+  }, [attempted, serverRowErrors, validation.errors.rows]);
+
+  // Filters + paging are display-only (useFilteredPaging): totals, validation
+  // and submit use visibleRows (every row of the currency); row indices stay
+  // global, so amounts on other pages / hidden rows are kept.
+  const view = useFilteredPaging(visibleRows, selectedCurrency, data.loadSeq, Object.keys(rowErrors).map(Number));
+  const { slice } = view;
+  const page = slice.page;
 
   // ── Session expiry (re-handover) ──
-  // Latest form state for the save hook below (it runs outside React).
-  const draftSourceRef = useRef({ vendorId, currency: selectedCurrency, header, rows });
-  draftSourceRef.current = { vendorId, currency: selectedCurrency, header, rows };
-  // apiFetch calls this right before leaving the page for a fresh handover.
+  // apiFetch returns to this route (next=<current path>). Latest state for the
+  // save hook below (it runs outside React): form, amounts, remarks, page.
+  const draftSourceRef = useRef({ vendorId, currency: selectedCurrency, header, rows, page });
+  draftSourceRef.current = { vendorId, currency: selectedCurrency, header, rows, page };
   useEffect(
     () =>
       onBeforeRehandover(() => {
         const s = draftSourceRef.current;
-        const draft = buildDraft(s.vendorId, s.currency, s.header, s.rows);
+        const draft = buildDraft(s.vendorId, s.currency, s.header, s.rows, s.page);
         const store = draftStorage();
         if (draft && store) saveDraft(store, draft);
       }),
     [],
   );
-  // Back from the handover: restore the saved form once, into rows that
-  // still exist, then the draft is gone (takeDraft deletes it).
+  // Back from the handover: restore once, into rows that still exist, then
+  // the draft is gone (takeDraft deletes it).
   const restoredRef = useRef(false);
   useEffect(() => {
     if (restoredRef.current || load.status !== "ready" || !vendorId) return;
@@ -190,18 +163,14 @@ export function NewPaymentClient() {
     const store = draftStorage();
     const draft = store ? takeDraft(store, vendorId) : null;
     if (!draft) return;
+    const restored = applyDraftRows(rows, draft);
     setHeader(draft.header);
-    setRows((rs) => applyDraftRows(rs, draft));
-    if (draft.currency) setSelectedCurrency(draft.currency);
-    setTouched(
-      new Set(
-        (Object.keys(draft.header) as (keyof PaymentHeaderValue)[]).filter(
-          (k) => draft.header[k] !== "" && draft.header[k] !== null,
-        ),
-      ),
-    );
-    setDirty(true);
-  }, [load.status, vendorId]);
+    setRows(restored);
+    if (draft.currency) data.setPickedCurrency(draft.currency);
+    const code = resolveSelectedCurrency(listCurrencies(restored), draft.currency);
+    view.restorePage(draft.page, code, data.loadSeq);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once after the first load
+  }, [load.status, vendorId, rows]);
 
   const current = useMemo<Sent | null>(
     () =>
@@ -211,25 +180,10 @@ export function NewPaymentClient() {
     [validation, header],
   );
 
-  // Client errors first; a server 400 message shows on rows the client
-  // considers valid.
-  const rowErrors = useMemo(() => {
-    const out: Record<number, Record<string, string>> = {};
-    for (const [i, msg] of Object.entries(serverRowErrors)) out[Number(i)] = { amount: msg };
-    for (const [i, fields] of Object.entries(validation.errors.rows)) out[Number(i)] = fields;
-    return out;
-  }, [serverRowErrors, validation.errors.rows]);
 
   const edited = () => {
-    setDirty(true);
     setServerRowErrors((e) => (Object.keys(e).length ? {} : e));
-  };
-  const setHeaderField = <K extends keyof PaymentHeaderValue>(field: K, value: PaymentHeaderValue[K]) => {
-    if (inFlightRef.current) return;
-    edited();
-    setTouched((t) => (t.has(field) ? t : new Set(t).add(field)));
-    setHeader((h) => ({ ...h, [field]: value }));
-    if (field === "remark") setRows((r) => applyHeaderRemark(r, value as string));
+    setServerHeaderErrors((e) => (Object.keys(e).length ? {} : e));
   };
   // `index` is the row's position in the (currency-filtered) table; rows are
   // updated by payment_request_id so filtering can never hit the wrong row.
@@ -241,38 +195,43 @@ export function NewPaymentClient() {
     setRows((rs) => rs.map((r) => (r.config.payment_request_id === id ? fn(r) : r)));
   };
 
-  // Refetch after every response so Payment Due is current, then merge the
-  // user's state (lib/payments/submit.ts).
-  const refreshAfter = async (result: BulkSubmitResult | null, fullSuccess: boolean) => {
+  // Form field change; the Remark is copied to every row without its own.
+  const setHeaderField = <K extends keyof PaymentHeaderValue>(field: K, value: PaymentHeaderValue[K]) => {
+    if (inFlightRef.current) return;
+    edited();
+    setHeader((h) => ({ ...h, [field]: value }));
+    if (field === "remark") setRows((r) => applyHeaderRemark(r, value as string));
+  };
+
+  // Refetch after an error response that stays on this page (and after a
+  // network error — the submit may have reached rDash), keeping the edits.
+  const refreshAfter = async () => {
     const r = await fetchRows();
     if (!r.ok) {
       setRefreshError(REFRESH_ERROR);
       return;
     }
     setRefreshError(null);
-    setRows((prev) => {
-      const merged = mergeRowsAfterSubmit(prev, r.rows, result);
-      return fullSuccess ? applyHeaderRemark(merged, "") : merged;
-    });
+    data.bumpLoadSeq();
+    setRows((prev) => mergeRowsAfterSubmit(prev, r.rows, null));
   };
 
-  const send = async (sent: Sent, kind: "submit" | "retry") => {
+  // Leaving page 2 after a submit (all recorded / popup OK) or Back.
+  const leave = () => {
+    const store = draftStorage();
+    if (store) clearDraft(store, vendorId);
+    goToList();
+  };
+
+  const send = async (sent: Sent) => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    setSubmitting(kind);
+    setSubmitting(true);
     setOutcome(null);
     setServerRowErrors({});
-    setRemovedIds(new Set());
+    setServerHeaderErrors({});
     setLastSent(sent);
-    const labels = new Map(
-      rows.map((r) => [
-        r.config.payment_request_id,
-        { requestNumber: r.details?.request_number ?? null, projectName: r.projectName },
-      ]),
-    );
-    let result: BulkSubmitResult | null = null;
-    let fullSuccess = false;
-    let sessionExpired = false;
+    let stay = true;
     try {
       let res: Response;
       try {
@@ -287,82 +246,50 @@ export function NewPaymentClient() {
         setOutcome({ kind: "error", message: SUBMIT_UNKNOWN });
         return;
       }
-      // 401: apiFetch saved the form and is navigating to a fresh handover.
-      // The submit is NOT re-sent — the user submits again from the restored
-      // form (a payment rDash already recorded shows as paid after reload).
+      // 401: apiFetch saved the state (draft) and is navigating to a fresh
+      // handover, which returns here. The submit is NOT re-sent — the user
+      // submits again from the restored page (a payment rDash already
+      // recorded shows as paid after reload).
       if (res.status === 401) {
-        sessionExpired = true;
+        stay = false;
         return;
       }
       const body: unknown = await res.json().catch(() => null);
 
       if (res.ok && isBulkSubmitResult(body)) {
-        result = body;
-        const store = draftStorage();
-        if (store) clearDraft(store, vendorId);
-        fullSuccess = body.failed.length === 0;
-        setOutcome({ kind: "result", result: body, amounts: sentAmounts(sent.request), labels, symbol: selectedOption?.symbol || null });
-        if (fullSuccess) {
-          setResultSent(null);
-          setHeader(EMPTY_HEADER);
-          setTouched(new Set());
-          setDirty(false);
-        } else {
-          setResultSent({ sent, result: body });
-          // Amount Paid becomes the not-recorded amount (same rule Retry uses).
-          setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(body, sent.request) }));
-        }
+        stay = false;
+        // All recorded → success prompt; some failed → partial prompt (only
+        // the failed rows). OK → /payments (fresh load shows the new dues).
+        setPrompt(submitPromptFor(body, sent.request, rows));
       } else if (res.status === 400 && isValidationRejection(body)) {
         setServerRowErrors(mapServerRowErrors(sent.request, body.fieldErrors, visibleRows));
-        setOutcome({ kind: "rejected", summary: body.summary });
+        setServerHeaderErrors(body.fieldErrors.header);
+        setOutcome({ kind: "rejected", form: body.fieldErrors.form });
       } else if (res.status === 403) {
         setOutcome({ kind: "error", message: errorText(body, "You do not have access to perform this action") });
       } else {
-        // 502 (incl. "could not confirm") or an unexpected 200 body: outcome unknown.
+        // 502 (incl. "created + failed don't cover every entry") or an
+        // unexpected 200 body: which payments were recorded is unknown →
+        // popup → OK → /payments (the reload shows what is still due).
         if (res.ok) console.error("[new-payment] unexpected bulk response body", body);
-        setOutcome({ kind: "error", message: res.ok ? SUBMIT_UNKNOWN : errorText(body, SUBMIT_UNKNOWN) });
+        stay = false;
+        setPrompt({ kind: "unconfirmed" });
       }
     } finally {
-      // Refetch after every response (and after a network error — the
-      // submit may have reached rDash). Not after a 401: the page is leaving.
-      if (!sessionExpired) await refreshAfter(result, fullSuccess);
+      if (stay) await refreshAfter();
       inFlightRef.current = false;
-      setSubmitting(null);
+      setSubmitting(false);
     }
   };
 
+  // Submit = the existing client validation, then the bulk API directly.
   const onSubmit = () => {
+    if (inFlightRef.current) return;
+    setAttempted(true);
     // Re-validate at click time from the latest state (never a stale render).
     const v = validateAllocation(header, visibleRows);
     if (!v.ok) return;
-    void send({ request: buildSubmitRequest(header, v.value), entries: buildBulkEntries(v.value) }, "submit");
-  };
-
-  const onRetryFailed = () => {
-    if (!resultSent) return;
-    const { sent, result } = resultSent;
-    // ONLY ids in failed[] (lib/payments/retry.ts).
-    void send(
-      { request: buildRetryRequest(result, sent.request), entries: buildRetryEntries(result, sent.entries) },
-      "retry",
-    );
-  };
-
-  // Remove a failed row: unlock it (lib rule) and drop it from Retry failed;
-  // Amount paid follows what is still retryable.
-  const onRemoveFailed = (index: number) => {
-    if (inFlightRef.current) return;
-    const row = visibleRows[index];
-    if (!row?.rowError) return;
-    const id = row.config.payment_request_id;
-    edited();
-    setRows((rs) => rs.map((r) => (r.config.payment_request_id === id ? dismissFailedRow(r) : r)));
-    setRemovedIds((s) => new Set(s).add(id));
-    if (resultSent) {
-      const result = removeFailedId(resultSent.result, id);
-      setResultSent({ sent: resultSent.sent, result });
-      setHeader((h) => ({ ...h, amountPaid: retryAmountPaid(result, resultSent.sent.request) }));
-    }
+    void send({ request: buildSubmitRequest(header, v.value), entries: buildBulkEntries(v.value) });
   };
 
   // Switching currency with amounts entered: confirm, then clear them (an
@@ -381,49 +308,109 @@ export function NewPaymentClient() {
       setRows((r) => clearAppliedAmounts(r));
     }
     edited();
-    setSelectedCurrency(code);
+    data.setPickedCurrency(code);
   };
 
-  const onCancel = async () => {
-    if (dirty) {
+  // Auto allocate: Amount Paid spread over the rows in display order (filters
+  // applied, all pages, this currency); rows outside the filter are cleared.
+  // Asks first when an editable row already has an amount.
+  const onAutoAllocate = async () => {
+    if (inFlightRef.current || autoAllocatePaidUnits(header.amountPaid) === null) return;
+    if (hasReplaceableAmounts(visibleRows)) {
       const ok = await confirm({
-        title: "Discard this payment?",
-        message: "The amounts and details you entered will be lost.",
+        title: "Replace the amounts already entered?",
+        message: "Payment Done will be filled from Amount Paid, top to bottom.",
+        confirmLabel: "Confirm",
+        cancelLabel: "Cancel",
+      });
+      if (!ok) return;
+    }
+    const order = view.shown.map((s) => s.row.config.payment_request_id);
+    const amountPaid = header.amountPaid;
+    edited();
+    setRows((rs) => autoAllocate(rs, order, amountPaid));
+  };
+
+  // "←" / Cancel → /payments; asks first when anything was entered (a form
+  // field, a row amount or a row's own remark).
+  const onBack = async () => {
+    if (inFlightRef.current) return;
+    if (entered) {
+      const ok = await confirm({
+        title: "Discard entered amounts?",
+        message: "The payment details and amounts you entered will be lost.",
         confirmLabel: "Discard",
         cancelLabel: "Keep editing",
         variant: "danger",
       });
       if (!ok) return;
     }
-    router.push(buildUrl("/payments"));
+    leave();
   };
 
-  const headerErrors = Object.fromEntries(
-    Object.entries(validation.errors.header).filter(([f]) => touched.has(f as keyof PaymentHeaderValue)),
-  );
+  const formMessage = formLevelMessage({ attempted, formErrors: validation.errors.form, outcome });
   const preview = current ? { label: "will be sent", sent: current } : lastSent ? { label: "last sent", sent: lastSent } : null;
 
   return (
     <>
-      <PageHeader
+      {/* Header like "← Create RFQ" (Save as Draft / Create & Send). */}
+      <CreatePageHeader
+        title="Create Payment"
+        onBack={() => void onBack()}
+        backDisabled={submitting}
         actions={
-          <CurrencyFilter
-            options={currencyOptions}
-            selected={selectedOption?.code ?? null}
-            onSelect={(code) => void onCurrencyChange(code)}
-            disabled={submitting !== null || load.status !== "ready"}
-          />
+          <>
+            <CurrencyFilter
+              options={currencyOptions}
+              selected={selectedOption?.code ?? null}
+              onSelect={(code) => void onCurrencyChange(code)}
+              disabled={submitting || load.status !== "ready"}
+            />
+            <CreatePageHeader.Cancel onClick={() => void onBack()} disabled={submitting} />
+            <CreatePageHeader.Submit
+              onClick={onSubmit}
+              sending={submitting}
+              disabled={load.status !== "ready" || visibleRows.length === 0 || submitting}
+            />
+          </>
         }
       />
-      <main className="flex flex-1 flex-col gap-5 p-5">
+      {/* Session error banner only (the DEV badge is in the header). */}
+      <PageHeader bannerOnly />
+      {/* Fills the remaining height; only the table rows scroll (TableBox). */}
+      <main className="flex min-h-0 flex-1 flex-col px-6 py-5">
         {/* Disabled while a submit is in flight — no edits can race the response. */}
-        <fieldset disabled={submitting !== null} aria-busy={submitting !== null} className="flex min-w-0 flex-col gap-5">
-          <PaymentHeader value={header} errors={headerErrors} onChange={setHeaderField} />
-          <SummaryCards
+        <fieldset disabled={submitting} aria-busy={submitting} className="flex min-h-0 min-w-0 flex-1 flex-col gap-5">
+          <CreatePaymentForm
+            value={header}
+            errors={fieldErrors}
+            onChange={setHeaderField}
             totals={totals}
             loaded={load.status === "ready" && selectedOption !== null}
-            rowCount={visibleRows.length}
-            currency={currency}
+            payableCount={visibleRows.length}
+            symbol={currency.symbol}
+            canAutoAllocate={
+              load.status === "ready" && selectedOption !== null && autoAllocatePaidUnits(header.amountPaid) !== null
+            }
+            onAutoAllocate={() => void onAutoAllocate()}
+            formMessage={formMessage}
+            footerExtra={
+              <>
+                {refreshError ? (
+                  <span role="alert" className="shrink-0 text-xs text-red-600">
+                    {refreshError}{" "}
+                    <button type="button" className={`${rdTextLink} text-xs underline`} onClick={() => void refreshAfter()}>
+                      Retry
+                    </button>
+                  </span>
+                ) : null}
+                {load.status === "ready" && noCurrencyCount > 0 ? (
+                  <span className="shrink-0 text-xs text-rd-pending">
+                    {noCurrencyCount} request{noCurrencyCount === 1 ? " has" : "s have"} no currency from rDash and can&apos;t be shown.
+                  </span>
+                ) : null}
+              </>
+            }
           />
 
           <TableBox
@@ -436,75 +423,76 @@ export function NewPaymentClient() {
               </>
             }
             action={
-              <button
-                type="button"
-                disabled={load.status !== "ready" || totals.selectedCount === 0}
-                onClick={() => {
-                  if (inFlightRef.current) return;
-                  edited();
-                  setRows((r) => clearAppliedAmounts(r));
-                }}
-                className={rdTextLink}
-              >
-                Clear applied amount
-              </button>
+              <div className="flex items-center gap-5">
+                {dataSource === "mock" && preview ? (
+                  <PayloadPreviewLink label={preview.label} request={preview.sent.request} entries={preview.sent.entries} />
+                ) : null}
+                {view.active ? (
+                  <button type="button" className={rdTextLink} onClick={view.clearFilters}>
+                    Clear filters
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={load.status !== "ready" || totals.selectedCount === 0}
+                  onClick={() => {
+                    if (inFlightRef.current) return;
+                    edited();
+                    setRows((r) => clearAppliedAmounts(r));
+                  }}
+                  className={rdTextLink}
+                >
+                  Clear applied amount
+                </button>
+              </div>
             }
             footer={
-              <>
-                <button type="button" className={rdButtonPrimary} disabled={!validation.ok || submitting !== null} onClick={onSubmit}>
-                  {submitting === "submit" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  {submitting === "submit" ? "Submitting…" : "Submit payments"}
-                </button>
-                <button type="button" className={rdButtonOutline} disabled={submitting !== null} onClick={() => void onCancel()}>
-                  Cancel
-                </button>
-              </>
+              load.status === "ready" && visibleRows.length > 0 ? (
+                <TablePagination
+                  slice={slice}
+                  errorPages={view.errorPages}
+                  hiddenErrors={view.hiddenErrors}
+                  onClearFilters={view.clearFilters}
+                  onPage={view.goToPage}
+                />
+              ) : (
+                <span className="h-8" />
+              )
             }
           >
-            {load.status === "loading" && <TableSkeleton />}
-            {load.status === "error" && <LoadError message={load.message} onRetry={() => void loadRows()} />}
-            {load.status === "ready" && rows.length === 0 && <EmptyState />}
-            {needsCurrencyPick && <EmptyState message="Select a currency to see payment requests" />}
-            {load.status === "ready" && visibleRows.length > 0 && (
-              <AllocationTable
-                currencySymbol={currency.symbol}
-                rows={visibleRows}
-                rowErrors={rowErrors}
-                onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
-                onPayInFull={(i) => updateRow(i, payInFull)}
-                onRemark={(i, v) => updateRow(i, (r) => setRowRemark(r, v))}
-                onRemove={onRemoveFailed}
-              />
-            )}
+            {/* The column header stays visible in every state; loading /
+                error / empty show inside the scroll area under it. */}
+            <AllocationTable
+              currencySymbol={currency.symbol}
+              items={load.status === "ready" ? slice.rows : []}
+              filters={view.filters}
+              filterOptions={view.options}
+              onFilters={view.setFilters}
+              todayKey={view.todayKey}
+              placeholder={
+                load.status === "loading" ? (
+                  <TableSkeleton />
+                ) : load.status === "error" ? (
+                  <LoadError message={load.message} onRetry={() => void data.loadRows()} />
+                ) : rows.length === 0 ? (
+                  <EmptyState />
+                ) : needsCurrencyPick ? (
+                  <EmptyState message="Select a currency to see payment requests" />
+                ) : view.shown.length === 0 && visibleRows.length > 0 ? (
+                  <EmptyState message="No payment requests match your filters" />
+                ) : null
+              }
+              placeholderAlign={load.status === "loading" ? "top" : "center"}
+              rowErrors={rowErrors}
+              onAmount={(i, v) => updateRow(i, (r) => setRowAmount(r, v))}
+              onPayInFull={(i) => updateRow(i, payInFull)}
+              onRemark={(i, v) => updateRow(i, (r) => setRowRemark(r, v))}
+            />
           </TableBox>
-
-          {load.status === "ready" && noCurrencyCount > 0 ? (
-            <p className="text-[12px] text-rd-pending">
-              {noCurrencyCount} request{noCurrencyCount === 1 ? " has" : "s have"} no currency from rDash and can&apos;t be shown.
-            </p>
-          ) : null}
-          {load.status === "ready" && visibleRows.length > 0 && dirty ? <ValidationList items={validation.summary} /> : null}
         </fieldset>
-
-        {refreshError ? (
-          <div className={rdCard}>
-            <LoadError message={refreshError} onRetry={() => void refreshAfter(null, false)} />
-          </div>
-        ) : null}
-        {outcome ? (
-          <SubmitResult
-            outcome={outcome}
-            retrying={submitting === "retry"}
-            busy={submitting !== null}
-            canRetry={(resultSent?.result.failed.length ?? 0) > 0}
-            removed={removedIds}
-            onRetryFailed={onRetryFailed}
-          />
-        ) : null}
-        {dataSource === "mock" && preview ? (
-          <PayloadPreview label={preview.label} request={preview.sent.request} entries={preview.sent.entries} />
-        ) : null}
       </main>
+
+      <SubmitPrompt prompt={prompt} symbol={currency.symbol} busy={submitting} onOk={leave} />
     </>
   );
 }

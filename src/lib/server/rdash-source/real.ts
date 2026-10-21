@@ -10,7 +10,6 @@ import type {
 import { createHash } from "node:crypto";
 import { apiFetch, paginateRdashDrf } from "../api";
 import { DedupeCache } from "../dedupe-cache";
-import { encodeRdashId } from "../rdash-id";
 import type { RdashSource } from "./types";
 
 // RDASH_DATA_SOURCE=real. Every call uses the logged-in user's access token,
@@ -18,10 +17,8 @@ import type { RdashSource } from "./types";
 // No refresh: an rDash 401 throws SessionExpiredError inside apiFetch /
 // paginateRdash (route → 401 session_expired → browser re-handover).
 //
-// Ids from rDash (project ids, payment_request_id) are passed back unchanged.
-// Only the session vendor id (stored decoded) is re-encoded for the query —
-// except in DEV static-token mode (`rawVendorId`), where RDASH_DEV_VENDOR_ID is
-// already rDash's own hashid and is sent exactly as given.
+// Ids from rDash (vendor id, project ids, payment_request_id) are opaque
+// strings and are passed back unchanged — no decode / re-encode.
 
 // Bulk body shape — confirmed `{ entries: [...] }` (Swagger's "data" is only
 // the body parameter's name). docs/api-notes.md #13 (resolved).
@@ -58,7 +55,7 @@ export function clearProjectsCache(): void {
 
 const tokenKey = (token: string) => createHash("sha256").update(token).digest("hex");
 
-export function createRealSource(accessToken: string, opts?: { rawVendorId?: boolean }): RdashSource {
+export function createRealSource(accessToken: string): RdashSource {
   if (!accessToken) throw new Error("createRealSource: missing access token");
   return {
     async listProjects(): Promise<RdashProject[]> {
@@ -75,9 +72,7 @@ export function createRealSource(accessToken: string, opts?: { rawVendorId?: boo
     },
 
     async listPaymentRequestConfig(vendorId: string): Promise<VendorPaymentRequestConfigItem[]> {
-      // TODO(verify): in handover mode the vendor_id query param takes the
-      // PBE-salt hashid (docs/api-notes.md → #1).
-      const vendor = encodeURIComponent(opts?.rawVendorId ? vendorId : encodeRdashId(vendorId));
+      const vendor = encodeURIComponent(vendorId);
       // DRF pagination: `results`, follow `next` until null, total must equal
       // `count` (never single-page, never partial).
       return paginateRdashDrf<VendorPaymentRequestConfigItem>(

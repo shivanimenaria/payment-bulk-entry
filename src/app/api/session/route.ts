@@ -7,7 +7,6 @@ import {
   getRequestLogContext,
   type AuthPayload,
 } from "@/lib/server/auth";
-import { decodeRdashIdSafe, encodeRdashId } from "@/lib/server/rdash-id";
 import { assertVendorInOrg, VendorNotFoundError, RdashPermissionError } from "@/lib/server/api";
 import { getDataSource } from "@/lib/server/rdash-source";
 
@@ -24,7 +23,6 @@ const REQUIRED_ENV = [
   "RDASH_CLIENT_ALG",
   "RDASH_CLIENT_PRIVATE_KEY_PEM",
   "COOKIE_SECRET",
-  "EMBEDDED_APPS_HASH_ID_SALT_PBE",
 ] as const;
 
 // In-memory cache of consumed handovers (code+next → redirect URL). The
@@ -78,18 +76,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(url);
   };
 
-  // rDash hands us hashid strings for user.id / org.id / project_id /
-  // org_id / vendor_id (encoded with the per-app salt). Decode at the
-  // boundary so the cookie and session cache deal in integer-string form.
-  // Re-encoding only happens just before outbound rDash calls / browser
-  // responses. An undecodable value becomes "".
-  // TODO(verify): rDash encodes the iframe URL's vendor_id / org_id with the
-  // PBE per-app salt (docs/api-notes.md → "ID encoding").
-  const toIntString = (raw: string): string => {
-    if (!raw) return "";
-    if (/^\d+$/.test(raw)) return raw;
-    return decodeRdashIdSafe(raw) ?? "";
-  };
+  // rDash ids (user.id / org.id / project_id / vendor_id) are opaque
+  // strings, already encoded by rDash for this app: stored and compared
+  // as-is, sent back to rDash unchanged (no decode / re-encode, no salt).
+  const toIntString = (raw: string): string => raw.trim();
 
   // vendor_id is required: PBE is opened from a vendor's Vendor Payments
   // page. Checked before consuming the handover so a bad URL doesn't burn
@@ -154,8 +144,8 @@ export async function GET(request: NextRequest) {
       throw err;
     }
 
-    // Re-encode for the URL bar so devtools never sees decoded rDash ints.
-    const encodeOrEmpty = (id: string) => (id ? encodeRdashId(id) : "");
+    // Ids are rDash's own strings — passed through unchanged.
+    const encodeOrEmpty = (id: string) => id;
     const defaultRedirect = `${appUrl}/payments?orgId=${encodeOrEmpty(orgId)}&projectId=${encodeOrEmpty(projectId)}&userId=${encodeOrEmpty(userId)}&vendorId=${encodeOrEmpty(vendorId)}`;
     const redirectUrl = nextParam ? `${appUrl}${nextParam}` : defaultRedirect;
     const response = NextResponse.redirect(redirectUrl);

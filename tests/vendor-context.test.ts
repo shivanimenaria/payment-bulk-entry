@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { jwtDecrypt } from "jose";
-import Hashids from "hashids";
-import { setAuthEnv, makeSessionCookie, TEST_COOKIE_SECRET, TEST_SALT } from "./helpers";
+import { setAuthEnv, makeSessionCookie, TEST_COOKIE_SECRET } from "./helpers";
 import {
   buildSessionUrl,
   mergeContextIntoTarget,
@@ -28,8 +27,8 @@ vi.mock("@/lib/server/auth", async (importOriginal) => {
   };
 });
 
-const h = new Hashids(TEST_SALT, 16);
-const enc = (n: number) => h.encode(n);
+// rDash ids are opaque strings (already encoded by rDash for this app).
+const enc = (n: number) => `rdId${n}Xq`;
 const APP = "https://pbe.example.com";
 const API = "https://rdash-api.example.com";
 
@@ -116,9 +115,9 @@ describe("bootstrap URL → /api/session", () => {
   });
 
   it("merges vendor_id into an explicit next", () => {
-    const params = new URLSearchParams(`vendor_id=${enc(33)}&next=/payments/new`);
-    const target = mergeContextIntoTarget("/payments/new", params);
-    expect(target).toBe(`/payments/new?vendor_id=${enc(33)}`);
+    const params = new URLSearchParams(`vendor_id=${enc(33)}&next=/payments`);
+    const target = mergeContextIntoTarget("/payments", params);
+    expect(target).toBe(`/payments?vendor_id=${enc(33)}`);
   });
 
   it("401 recovery (force=1): vendor comes from next's camelCase vendorId", () => {
@@ -139,7 +138,7 @@ describe("bootstrap URL → /api/session", () => {
 });
 
 describe("/api/session: vendor + org verification", () => {
-  it("valid vendor: cookie stores decoded vendorId, /api/auth/me returns it encoded", async () => {
+  it("valid vendor: cookie stores rDash's vendor id as given, /api/auth/me returns it unchanged", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(vendorsResponse([5, 33]));
 
@@ -161,7 +160,7 @@ describe("/api/session: vendor + org verification", () => {
     const cookie = pbeCookie(res)!;
     expect(cookie).toBeTruthy();
     const payload = await decryptCookie(cookie);
-    expect(payload).toMatchObject({ vendorId: "33", orgId: "11", projectId: "22", userId: "7", accessToken: "new-access" });
+    expect(payload).toMatchObject({ vendorId: enc(33), orgId: enc(11), projectId: enc(22), userId: enc(7), accessToken: "new-access" });
     // Access token only: no refresh token kept; cookie lives until it expires.
     expect(payload).not.toHaveProperty("refreshToken");
     expect(payload).not.toHaveProperty("refreshExpiresAt");
@@ -180,7 +179,7 @@ describe("/api/session: vendor + org verification", () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(vendorsResponse([33]));
     const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33) }));
-    expect((await decryptCookie(pbeCookie(res)!)).orgId).toBe("11");
+    expect((await decryptCookie(pbeCookie(res)!)).orgId).toBe(enc(11));
   });
 
   it("missing vendor_id → error=missing_vendor, no cookie, handover not consumed", async () => {
@@ -198,10 +197,12 @@ describe("/api/session: vendor + org verification", () => {
     expect(res.headers.get("set-cookie")).toBeNull();
   });
 
-  it("undecodable vendor_id → error=vendor_not_found before consuming", async () => {
+  it("unknown vendor_id (any string) → vendor_not_found via /v2/vendors — ids are never decoded", async () => {
+    consumeHandoverCode.mockResolvedValue(handoverResult(11));
+    fetchMock.mockResolvedValue(vendorsResponse([5, 33]));
     const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: "not-a-hashid!" }));
     expect(res.headers.get("location")).toBe(`${APP}/embedded/bootstrap?error=vendor_not_found`);
-    expect(consumeHandoverCode).not.toHaveBeenCalled();
+    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("rDash 403 on /v2/vendors → vendor_forbidden (permission error, not 'not found')", async () => {
@@ -215,7 +216,7 @@ describe("/api/session: vendor + org verification", () => {
   it("rDash 401 on /v2/vendors → session_error, no refresh, no retry", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(vendorsResponse([], 401));
-    const oldCookie = await makeSessionCookie({ userId: "8" });
+    const oldCookie = await makeSessionCookie({ userId: enc(8) });
     const res = await sessionGET(
       sessionReq({ handover: nextCode(), vendor_id: enc(33) }, `pbe-auth=${oldCookie}`),
     );
@@ -235,13 +236,28 @@ describe("/api/session: vendor + org verification", () => {
   it("lastPath is preserved only when the vendor is unchanged", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockImplementation(async () => vendorsResponse([33, 34]));
-    const old = await makeSessionCookie({ orgId: "11", projectId: "", vendorId: "33", lastPath: "/payments/new" });
+    const old = await makeSessionCookie({ orgId: enc(11), projectId: "", userId: enc(7), vendorId: enc(33), lastPath: "/payments" });
 
     const same = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33) }, `pbe-auth=${old}`));
-    expect((await decryptCookie(pbeCookie(same)!)).lastPath).toBe("/payments/new");
+    expect((await decryptCookie(pbeCookie(same)!)).lastPath).toBe("/payments");
 
     const other = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(34) }, `pbe-auth=${old}`));
     expect((await decryptCookie(pbeCookie(other)!)).lastPath).toBeUndefined();
+  });
+
+  it("/payments/new (Create Payment) is a restorable lastPath", async () => {
+    consumeHandoverCode.mockResolvedValue(handoverResult(11));
+    fetchMock.mockImplementation(async () => vendorsResponse([33]));
+    const old = await makeSessionCookie({ orgId: enc(11), projectId: "", userId: enc(7), vendorId: enc(33), lastPath: "/payments/new" });
+    const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33) }, `pbe-auth=${old}`));
+    expect((await decryptCookie(pbeCookie(res)!)).lastPath).toBe("/payments/new");
+  });
+
+  it("default redirect after a handover is /payments (the table page)", async () => {
+    consumeHandoverCode.mockResolvedValue(handoverResult(11));
+    fetchMock.mockImplementation(async () => vendorsResponse([33]));
+    const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33) }));
+    expect(new URL(res.headers.get("location")!).pathname).toBe("/payments");
   });
 });
 
@@ -296,10 +312,10 @@ describe("/api/session: app_slug, response shape, id decoding", () => {
     expect(res.headers.get("set-cookie")).toBeNull();
   });
 
-  it("undecodable vendor id in /v2/vendors → session_error (raw id never kept)", async () => {
+  it("vendor without an id in /v2/vendors → session_error (never guessed)", async () => {
     consumeHandoverCode.mockResolvedValue(handoverResult(11));
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ success: true, data: [{ id: "33", name: "V", code: "C" }] }), { status: 200 }),
+      new Response(JSON.stringify({ success: true, data: [{ name: "V", code: "C" }] }), { status: 200 }),
     );
     const res = await sessionGET(sessionReq({ handover: nextCode(), vendor_id: enc(33) }));
     expect(res.headers.get("location")).toBe(`${APP}/embedded/bootstrap?error=session_error`);
@@ -316,7 +332,7 @@ describe("middleware: org / vendor from the URL are never trusted", () => {
     ["vendorId (hashid)", () => `/payments?vendorId=${enc(34)}`],
     ["vendor_id (hashid)", () => `/api/rdash/x?vendor_id=${enc(34)}`],
   ])("%s differing from the cookie clears it", async (_label, path) => {
-    const cookie = await makeSessionCookie({ orgId: "11", vendorId: "33" });
+    const cookie = await makeSessionCookie({ orgId: enc(11), vendorId: enc(33) });
     const res = await mw(path(), cookie);
     expect(res.headers.get("set-cookie")).toMatch(/pbe-auth=; Path=\/; Max-Age=0/);
     expect(res.headers.get("x-middleware-request-cookie")).toBeNull();
@@ -329,16 +345,16 @@ describe("middleware: org / vendor from the URL are never trusted", () => {
   });
 
   it("matching org + vendor keeps the cookie untouched", async () => {
-    const cookie = await makeSessionCookie({ orgId: "11", vendorId: "33", projectId: "22" });
+    const cookie = await makeSessionCookie({ orgId: enc(11), vendorId: enc(33), projectId: enc(22) });
     const res = await mw(`/api/auth/me?orgId=${enc(11)}&vendorId=${enc(33)}&projectId=${enc(22)}`, cookie);
     expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("project switch still rewrites projectId only", async () => {
-    const cookie = await makeSessionCookie({ orgId: "11", vendorId: "33", projectId: "22" });
+    const cookie = await makeSessionCookie({ orgId: enc(11), vendorId: enc(33), projectId: enc(22) });
     const res = await mw(`/api/auth/me?orgId=${enc(11)}&vendorId=${enc(33)}&projectId=${enc(99)}`, cookie);
     const set = /pbe-auth=([^;]+)/.exec(res.headers.get("set-cookie") || "")![1];
-    expect(await decryptCookie(set)).toMatchObject({ projectId: "99", orgId: "11", vendorId: "33" });
+    expect(await decryptCookie(set)).toMatchObject({ projectId: enc(99), orgId: enc(11), vendorId: enc(33) });
   });
 });
 
@@ -347,7 +363,7 @@ describe("getAuth: vendor bound to the session", () => {
     meGET(new NextRequest(`${APP}${path}`, { headers: { cookie: `pbe-auth=${cookie}` } }));
 
   it("URL vendor differing from the session → 401", async () => {
-    const cookie = await makeSessionCookie({ vendorId: "33" });
+    const cookie = await makeSessionCookie({ vendorId: enc(33) });
     expect((await me(`/api/auth/me?vendor_id=${enc(34)}`, cookie)).status).toBe(401);
   });
 
@@ -355,14 +371,14 @@ describe("getAuth: vendor bound to the session", () => {
     ["orgId (hashid)", () => `/api/auth/me?orgId=${enc(12)}`],
     ["org_id (integer)", () => `/api/auth/me?org_id=12`],
   ])("URL %s differing from the session → 401 with a fixed message", async (_l, path) => {
-    const cookie = await makeSessionCookie({ orgId: "11", vendorId: "33" });
+    const cookie = await makeSessionCookie({ orgId: enc(11), vendorId: enc(33) });
     const res = await me(path(), cookie);
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "Not authenticated" });
   });
 
   it("matching URL org → 200", async () => {
-    const cookie = await makeSessionCookie({ orgId: "11", vendorId: "33" });
+    const cookie = await makeSessionCookie({ orgId: enc(11), vendorId: enc(33) });
     expect((await me(`/api/auth/me?orgId=${enc(11)}`, cookie)).status).toBe(200);
   });
 

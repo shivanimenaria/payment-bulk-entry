@@ -13,7 +13,7 @@ export const REHANDOVER_MARKER_KEY = "pbe:rehandover-at";
 export const LOOP_WINDOW_MS = 60_000;
 export const SESSION_RENEW_FAILED_URL = "/embedded/bootstrap?error=session_renew_failed";
 
-// Pages with unsaved input register here (/payments/new saves its form).
+// Pages with unsaved input register here (/payments saves its form and modal).
 // Run synchronously right before the iframe leaves the page.
 type BeforeRehandover = () => void;
 const beforeRehandover = new Set<BeforeRehandover>();

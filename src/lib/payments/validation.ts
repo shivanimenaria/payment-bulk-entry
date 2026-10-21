@@ -193,11 +193,14 @@ function finish(errors: FieldErrors, summary: string[], value: ValidatedSubmissi
 /** `bulkAmountAsString` defaults to BULK_AMOUNT_AS_STRING (build-payload.ts). */
 export type AmountOptions = { bulkAmountAsString?: boolean };
 
-export function validateAllocation(header: PaymentHeader, rows: AllocationRow[], opts: AmountOptions = {}): ValidationResult {
-  const errors = emptyErrors();
-  const h = validateHeader(header);
-  errors.header = h.errors;
-
+/** Row checks only (no header): per-row amount errors keyed by row index,
+ *  and the rows that will be sent (amount > 0). Used by validateAllocation
+ *  and by row-level checks on /payments/new. */
+export function validateRows(
+  rows: AllocationRow[],
+  opts: AmountOptions = {},
+): { rowErrors: FieldErrors["rows"]; selected: ValidatedSubmission["rows"] } {
+  const rowErrors: FieldErrors["rows"] = {};
   const selected: ValidatedSubmission["rows"] = [];
   rows.forEach((row, i) => {
     const zero = BigInt(0);
@@ -214,7 +217,7 @@ export function validateAllocation(header: PaymentHeader, rows: AllocationRow[],
       else if (dueUnits === null || dueUnits <= zero) msg = MESSAGES.nothingDue;
     }
     if (msg) {
-      errors.rows[i] = { amount: msg };
+      rowErrors[i] = { amount: msg };
       return;
     }
     if (amountUnits !== null && amountUnits > zero) {
@@ -222,6 +225,16 @@ export function validateAllocation(header: PaymentHeader, rows: AllocationRow[],
       selected.push({ payment_request_id: row.config.payment_request_id, amountUnits, remark });
     }
   });
+  return { rowErrors, selected };
+}
+
+export function validateAllocation(header: PaymentHeader, rows: AllocationRow[], opts: AmountOptions = {}): ValidationResult {
+  const errors = emptyErrors();
+  const h = validateHeader(header);
+  errors.header = h.errors;
+
+  const { rowErrors, selected } = validateRows(rows, opts);
+  errors.rows = rowErrors;
 
   const hasRowErrors = Object.keys(errors.rows).length > 0;
   if (!hasRowErrors && selected.length === 0) errors.form.push(MESSAGES.noSelection);

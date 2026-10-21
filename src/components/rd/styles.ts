@@ -55,3 +55,17 @@ export function rdStatusClass(status: string | null | undefined): string {
       return "text-rd-black";
   }
 }
+
+/** rDash outlined black button (dialog "Cancel", RDButtonV2 variant="outlined" color="black"). */
+export const rdButtonOutlineBlack =
+  "inline-flex h-8 items-center justify-center gap-1.5 rounded-rd border border-rd-black bg-white px-4 text-[14px] font-semibold text-rd-black hover:bg-rd-fill disabled:cursor-not-allowed disabled:opacity-50";
+
+/** rDash form input (dialogs: RDTextInput look) — 36px, white, 1px #c7c8c9
+ *  border, 6px radius, 14px text, #98a2b3 placeholder, red border on focus.
+ *  TODO(verify): rDash's form-input CSS is not in docs/ui-reference and the
+ *  Figma frame was not available to measure — check against Figma. */
+export const rdFormInput =
+  "h-9 w-full rounded-rd border border-rd-border bg-white px-3 text-[14px] text-rd-black placeholder:text-rd-placeholder " +
+  "outline-none focus:border-rd-red disabled:cursor-not-allowed disabled:bg-rd-fill";
+
+export const rdFormInputCls = (invalid?: boolean, extra?: string) => cn(rdFormInput, invalid && "border-rd-red", extra);

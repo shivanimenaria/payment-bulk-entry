@@ -3,7 +3,6 @@ import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { cookies, headers } from "next/headers";
 import { EncryptJWT, jwtDecrypt, SignJWT, importPKCS8 } from "jose";
-import { decodeRdashIdSafe } from "./rdash-id";
 import { requireEnv } from "./env";
 import { getDataSource } from "./rdash-source/mode";
 import { devStaticTokenConfig, getCookieSecretKey, resolveAuthMode } from "@/lib/runtime-config";
@@ -220,16 +219,9 @@ export async function getOutboundContextHeaders(): Promise<Record<string, string
   return out;
 }
 
-// Defensive: an older cookie issued before the rDash-ID-decode rollout may
-// still carry hashid strings for orgId/projectId/userId. Detect the hashid
-// shape (non-numeric) and decode in place so downstream writes (created_by,
-// activity_log.actor_id, etc.) always land in the DB as integer-strings.
+// Ids are rDash's own opaque strings, kept exactly as rDash sent them.
 function normalizePayloadIds(p: AuthPayload): AuthPayload {
-  const fix = (v: string | undefined): string | undefined => {
-    if (!v) return v;
-    if (/^\d+$/.test(v)) return v;
-    return decodeRdashIdSafe(v) ?? v;
-  };
+  const fix = (v: string | undefined): string | undefined => v;
   return {
     ...p,
     orgId: fix(p.orgId) || "",
@@ -347,9 +339,7 @@ export async function getAuth(request: NextRequest): Promise<GetAuthResult> {
     request.nextUrl.searchParams.get("user_id") ||
     "";
   if (urlUserIdRaw && payload.userId) {
-    const urlUserId = /^\d+$/.test(urlUserIdRaw)
-      ? urlUserIdRaw
-      : (decodeRdashIdSafe(urlUserIdRaw) ?? urlUserIdRaw);
+    const urlUserId = urlUserIdRaw;
     if (urlUserId !== payload.userId) {
       // RCA: this means middleware didn't run for this path (matcher gap) or
       // the cookie changed between middleware and this handler. Either way,
@@ -372,9 +362,7 @@ export async function getAuth(request: NextRequest): Promise<GetAuthResult> {
     request.nextUrl.searchParams.get("org_id") ||
     "";
   if (urlOrgIdRaw && payload.orgId) {
-    const urlOrgId = /^\d+$/.test(urlOrgIdRaw)
-      ? urlOrgIdRaw
-      : (decodeRdashIdSafe(urlOrgIdRaw) ?? urlOrgIdRaw);
+    const urlOrgId = urlOrgIdRaw;
     if (urlOrgId !== payload.orgId) {
       console.warn("[auth/getAuth] orgId mismatch, refusing request", {
         path: request.nextUrl.pathname,
@@ -425,9 +413,7 @@ function assertSessionVendor(payload: AuthPayload, urlVendorIdRaw: string, where
     throw new AuthError("Session has no vendor");
   }
   if (!urlVendorIdRaw) return;
-  const urlVendorId = /^\d+$/.test(urlVendorIdRaw)
-    ? urlVendorIdRaw
-    : (decodeRdashIdSafe(urlVendorIdRaw) ?? urlVendorIdRaw);
+  const urlVendorId = urlVendorIdRaw;
   if (urlVendorId !== payload.vendorId) {
     console.warn(`[auth/${where}] vendorId mismatch, refusing request`, {
       urlVendorId,
@@ -473,14 +459,8 @@ export async function getAuthFromCookies(searchParams?: Record<string, string | 
     typeof v === "string" && v.trim().length > 0 ? v : undefined;
   // rDash hands off via snake_case (project_id/org_id/user_id) but our own
   // redirects use camelCase. Accept either.
-  // URL params arrive as rDash hashids when rDash navigates between projects
-  // mid-session; decode to integer-string form to match the cookie payload.
-  // Already-decoded values (from our own redirects) are passed through.
-  const decodeMaybe = (v: string | undefined) => {
-    if (!v) return v;
-    if (/^\d+$/.test(v)) return v;
-    return decodeRdashIdSafe(v) ?? v;
-  };
+  // URL ids are rDash's opaque strings — compared with the cookie as-is.
+  const decodeMaybe = (v: string | undefined) => v;
   const urlProjectId = decodeMaybe(pickStr(searchParams?.projectId) || pickStr(searchParams?.project_id));
   const urlOrgId = decodeMaybe(pickStr(searchParams?.orgId) || pickStr(searchParams?.org_id));
   const urlUserId = decodeMaybe(pickStr(searchParams?.userId) || pickStr(searchParams?.user_id));

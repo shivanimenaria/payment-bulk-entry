@@ -28,9 +28,14 @@ export const DETAILS_ERROR_MESSAGE = "Details could not be loaded";
 export async function loadAllocationRows(
   source: RdashSource,
   vendorId: string,
-  opts?: { keep?: (item: VendorPaymentRequestConfigItem) => boolean },
+  opts?: {
+    keep?: (item: VendorPaymentRequestConfigItem) => boolean;
+    /** Receives the FULL config (before `keep`), e.g. for the page-1 cards. */
+    onConfig?: (all: VendorPaymentRequestConfigItem[]) => void;
+  },
 ): Promise<AllocationRow[]> {
   const all = await source.listPaymentRequestConfig(vendorId);
+  opts?.onConfig?.(all);
   const config = opts?.keep ? all.filter(opts.keep) : all;
 
   // TODO(remove-temp-project-id): validated at startup; re-resolved here so an

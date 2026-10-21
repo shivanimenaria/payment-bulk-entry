@@ -1,5 +1,4 @@
 import "server-only";
-import { decodeRdashIdSafe } from "./rdash-id";
 import { SessionExpiredError, getRequestLogContext, getOutboundContextHeaders } from "./auth";
 import { requireEnv } from "./env";
 import { devStaticTokenConfig, resolveAuthMode } from "@/lib/runtime-config";
@@ -37,10 +36,10 @@ async function failOn401(where: string, path: string, res: Response): Promise<ne
   throw new SessionExpiredError(`rDash 401 on ${path}`);
 }
 
-/** An rDash `id` that isn't a hashid decodable with the PBE salt. */
+/** An rDash list row without a usable `id` string. */
 export class RdashIdDecodeError extends Error {
   constructor(path?: string) {
-    super(`Undecodable rDash id${path ? ` in ${path}` : ""}`);
+    super(`Missing rDash id${path ? ` in ${path}` : ""}`);
     this.name = "RdashIdDecodeError";
   }
 }
@@ -62,18 +61,14 @@ export class RdashUpstreamError extends Error {
   }
 }
 
-// Decode the top-level rDash hashid `id` of each row to integer-string form
-// (does NOT recurse into nested objects). An id that is missing or doesn't
-// decode with the PBE salt throws — the raw value is never kept.
-// TODO(verify): rDash encodes list `id`s as hashids with the PBE per-app
-// salt (docs/api-notes.md → "ID encoding").
+// Each row's top-level rDash `id` is kept exactly as rDash sent it (an
+// opaque hashid string — no decode, no salt). A missing / empty id throws —
+// never guessed.
 function decodeIdField<T extends { id?: unknown }>(row: T): T {
-  const decoded = typeof row?.id === "string" ? decodeRdashIdSafe(row.id) : null;
-  if (!decoded) {
-    console.error("[api] undecodable rDash id", { type: typeof row?.id });
+  if (typeof row?.id !== "string" || row.id.trim() === "") {
+    console.error("[api] missing rDash id", { type: typeof row?.id });
     throw new RdashIdDecodeError();
   }
-  (row as { id: string }).id = decoded;
   return row;
 }
 function decodeIdFields<T extends { id?: unknown }>(rows: T[]): T[] {

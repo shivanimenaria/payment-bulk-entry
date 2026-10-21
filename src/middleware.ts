@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { EncryptJWT, jwtDecrypt } from "jose";
-import Hashids from "hashids";
 import { getCookieSecretKey } from "@/lib/runtime-config";
 
 // Edge runtime — no Node-only imports.
@@ -28,33 +27,11 @@ const SESSION_EXPIRED = "session_expired";
 const getSecretKey = getCookieSecretKey;
 const IS_DEV = process.env.NODE_ENV !== "production";
 
-// rDash hashid decoder — middleware sees URL params (project_id/org_id/user_id/vendor_id)
-// in rDash's hashid form when rDash navigates between projects without a
-// fresh handover. Decode before comparing to the cookie's decoded values.
-// Inlined here because middleware runs on Edge runtime and can't import
-// `server-only` modules. Same salt as src/lib/server/rdash-id.ts.
-let rdashHashids: Hashids | null = null;
-function getHashids(): Hashids {
-  if (rdashHashids) return rdashHashids;
-  const salt = process.env.EMBEDDED_APPS_HASH_ID_SALT_PBE;
-  if (!salt) throw new Error("EMBEDDED_APPS_HASH_ID_SALT_PBE is not set");
-  rdashHashids = new Hashids(salt, 16);
-  return rdashHashids;
-}
-function decodeRdashIdMaybe(hash: string): string {
-  // Pass through values that are already integer-string (e.g. when our own
-  // app redirected back with decoded form). Only attempt rDash decode for
-  // values that don't look like decimal ints.
-  if (!hash) return "";
-  if (/^\d+$/.test(hash)) return hash;
-  const h = getHashids();
-  try {
-    const decoded = h.decode(hash);
-    return decoded.length === 1 ? String(decoded[0]) : hash;
-  } catch {
-    // Characters outside the hashid alphabet — not a valid rDash id.
-    return hash;
-  }
+// rDash ids (org/project/user/vendor) are opaque strings: rDash already
+// hands them to us encoded for this app and accepts them back unchanged, so
+// they are compared as-is (no hashid decode, no salt).
+function urlId(value: string): string {
+  return value.trim();
 }
 
 interface AuthPayload {
@@ -183,10 +160,10 @@ export async function middleware(request: NextRequest) {
   // rDash sends snake_case (project_id/org_id/user_id/vendor_id) via the
   // handover `next=` param; our own redirects use camelCase. Accept both.
   const sp = request.nextUrl.searchParams;
-  const urlOrgId = decodeRdashIdMaybe(sp.get("orgId") || sp.get("org_id") || "");
-  const urlProjectId = decodeRdashIdMaybe(sp.get("projectId") || sp.get("project_id") || "");
-  const urlUserId = decodeRdashIdMaybe(sp.get("userId") || sp.get("user_id") || "");
-  const urlVendorId = decodeRdashIdMaybe(sp.get("vendorId") || sp.get("vendor_id") || "");
+  const urlOrgId = urlId(sp.get("orgId") || sp.get("org_id") || "");
+  const urlProjectId = urlId(sp.get("projectId") || sp.get("project_id") || "");
+  const urlUserId = urlId(sp.get("userId") || sp.get("user_id") || "");
+  const urlVendorId = urlId(sp.get("vendorId") || sp.get("vendor_id") || "");
 
   // Fix B (Layer 1): userId mismatch ≠ project/org mismatch and cannot be
   // recovered by rewriting the cookie. Project/org are workspace selectors

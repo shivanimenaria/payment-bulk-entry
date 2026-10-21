@@ -20,6 +20,21 @@ export function formatDate(value: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? value : istDate.format(d);
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Payment date (Amount Paid modal): "2026-09-23" → "23 Sep 2026". The value
+ *  sent stays "YYYY-MM-DD". "" → "" (placeholder shown); anything that isn't a
+ *  real calendar date is shown raw (never guessed). */
+export function formatPaymentDate(value: string | null | undefined): string {
+  if (!value) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return value;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return value;
+  return `${d} ${MONTHS[mo - 1]} ${y}`;
+}
+
 /** "partially_paid" → "Partially paid" (display only). */
 export function formatStatus(value: string | null | undefined): string {
   if (!value) return DASH;

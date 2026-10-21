@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
-import Hashids from "hashids";
-import { setAuthEnv, TEST_SALT } from "./helpers";
+import { setAuthEnv } from "./helpers";
 import { createMockSource, resetMockState, MockVendorNotFoundError } from "@/lib/server/rdash-source/mock";
 import { createRealSource, buildBulkBody, BULK_BODY_WRAPPER, clearProjectsCache } from "@/lib/server/rdash-source/real";
 import { loadAllocationRows, DETAILS_ERROR_MESSAGE } from "@/lib/server/rdash-source/allocation-rows";
@@ -352,14 +351,14 @@ describe("real source", () => {
   const CONFIG = "/v2/vendor-payment-requests/config/";
   const drf = (count: number, results: unknown[], next: string | null) => ok({ count, next, previous: null, results });
 
-  it("config: DRF pages — follows `next` exactly until null; total must equal count; vendor re-encoded", async () => {
-    const enc33 = new Hashids(TEST_SALT, 16).encode(33);
+  it("config: DRF pages — follows `next` exactly until null; total must equal count; vendor id sent as given", async () => {
+    const enc33 = "rdId33Xq";
     const nextUrl = (offset: number) => `${API}${CONFIG}?limit=2&offset=${offset}&vendor_id=${enc33}`;
     fetchMock
       .mockResolvedValueOnce(drf(5, [item(0), item(1)], nextUrl(2)))
       .mockResolvedValueOnce(drf(5, [item(2), item(3)], nextUrl(4)))
       .mockResolvedValueOnce(drf(5, [item(4)], null));
-    const rows = await createRealSource("tok").listPaymentRequestConfig("33");
+    const rows = await createRealSource("tok").listPaymentRequestConfig(enc33);
     expect(rows.map((r) => r.payment_request_id)).toEqual(["pr0", "pr1", "pr2", "pr3", "pr4"]);
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
     const first = new URL(urls[0]);
@@ -442,10 +441,9 @@ describe("real source: project names with hashid ids", () => {
     new Response(JSON.stringify({ success: true, code: 200, message: "", errors: null, data }), { status: 200 });
 
   it("config project_id and /v2/projects id stay in the same (hashid) form → projectName found", async () => {
-    const h = new Hashids(TEST_SALT, 16);
-    const P5 = h.encode(5);
-    const P6 = h.encode(6);
-    const PR = h.encode(901);
+    const P5 = "rdId5Xq";
+    const P6 = "rdId6Xq";
+    const PR = "rdId901Xq";
     const fetchMock = vi.fn(async (url: string) => {
       const u = new URL(url);
       if (u.pathname === "/v2/vendor-payment-requests/config/") {

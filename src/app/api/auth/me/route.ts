@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionOrMock, AuthError, authErrorResponse, COOKIE_NAME } from "@/lib/server/auth";
-import { encodeRdashId } from "@/lib/server/rdash-id";
 import { safeJson } from "@/lib/server/respond-safe";
 import { getDataSource } from "@/lib/server/rdash-source";
 import { DedupeCache } from "@/lib/server/dedupe-cache";
@@ -38,11 +37,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const { auth, mock, dev } = await getSessionOrMock(request);
-    // Internal storage form is the decoded integer-string ("498"); the browser
-    // only ever sees rDash hashids. Mock IDs are not real rDash IDs, and DEV
-    // static-token ids are already rDash's own, so both are returned as-is.
-    const encode = (id: string) => (!id ? "" : mock || dev ? id : encodeRdashId(id));
+    const { auth, dev } = await getSessionOrMock(request);
+    // Ids are rDash's own opaque strings (stored as given) — returned as-is.
+    const encode = (id: string) => id || "";
     const payload = {
       orgId: encode(auth.orgId),
       projectId: encode(auth.projectId),

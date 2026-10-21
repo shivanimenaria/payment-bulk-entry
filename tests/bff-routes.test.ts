@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
-import Hashids from "hashids";
-import { setAuthEnv, makeSessionCookie, TEST_SALT } from "./helpers";
+import { setAuthEnv, makeSessionCookie } from "./helpers";
 import { GET as projectsGET } from "@/app/api/rdash/projects/route";
 import { GET as requestsGET } from "@/app/api/rdash/payment-requests/route";
 import { POST as bulkPOST } from "@/app/api/rdash/payment-entries/bulk/route";
@@ -12,8 +11,8 @@ import { rdashUnits } from "@/lib/payments/money";
 
 const APP = "https://pbe.example.com";
 const API = "https://rdash-api.example.com";
-const h = new Hashids(TEST_SALT, 16);
-const enc = (n: number) => h.encode(n);
+// rDash ids are opaque strings (already encoded by rDash for this app).
+const enc = (n: number) => `rdId${n}Xq`;
 const CONFIG_PATH = "/v2/vendor-payment-requests/config/";
 const BULK_PATH = "/v2/vendor-payment-requests/payment-entries/bulk/";
 
@@ -87,7 +86,7 @@ beforeEach(async () => {
   delete process.env.MOCK_FAIL_IDS;
   resetMockState();
   clearProjectsCache();
-  cookie = await makeSessionCookie({ vendorId: "33" });
+  cookie = await makeSessionCookie({ vendorId: enc(33) });
   serverConfig = SERVER_CONFIG;
   bulkResponse = () => ok({ count: 0, created: [], failed: [] });
   fetchMock = vi.fn(async (url: string, init?: RequestInit) => rdashStub(url, init));
@@ -112,6 +111,23 @@ describe("GET /api/rdash/payment-requests (real)", () => {
     expect(rows[0]).toMatchObject({ projectName: "Tower One", detailsError: null, detailsUnavailable: false, rowError: null });
     expect(rows[1]).toMatchObject({ details: null, detailsError: "Details could not be loaded", rowError: null });
     expect(rows[2]).toMatchObject({ detailsUnavailable: true, details: null, projectName: null });
+  });
+
+  it("summaries (page-1 cards) are computed from the FULL config, incl. rows not sent as rows", async () => {
+    const res = await get(requestsGET, "/api/rdash/payment-requests");
+    const { rows, summaries } = await res.json();
+    expect(rows).toHaveLength(3); // PR0 (due 0) is not a row …
+    expect(summaries).toEqual({
+      INR: {
+        // … but counts here: PR1 1000 + PR2 800 + PR3 200.5 + PR0 50
+        paymentRequested: { count: 4, total: "2050.5" },
+        paymentApproved: { count: 4, total: "2050.5" },
+        pendingApproval: { count: 0, total: "0" },
+        paymentDue: { count: 3, total: "1700.5" },
+        paymentsDone: { count: 2, total: "350" },
+        invalidAmounts: 0,
+      },
+    });
   });
 
   it("a different vendor in the query is never used (session is refused → 401, no rDash call)", async () => {

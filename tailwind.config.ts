@@ -7,6 +7,9 @@ const config: Config = {
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+    // Class strings built in pure modules (badge / accent colours in
+    // lib/payments/table-display.ts).
+    "./src/lib/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     extend: {

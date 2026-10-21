@@ -33,7 +33,7 @@ const RDASH_ID_FIELDS = new Set([
   "hash_id", "hashId",
 ]);
 
-// rDash hashids are 16-char alphanumeric (per the configured MIN_LENGTH).
+// rDash hashids are 16-char alphanumeric (rdash-api encodes them; PBE passes them through).
 // Decoded ints are short numeric strings. We allow numeric look-alikes only
 // when they could not possibly be encoded ids (e.g. 17+ chars).
 const LOOKS_LIKE_DECODED_INT = /^\d{1,12}$/;

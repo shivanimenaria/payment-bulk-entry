@@ -1,0 +1,10 @@
+<!-- PBE warning icon in the halo style of project-create-success-tick-icon.svg
+     (52px, two translucent rings + solid disc), in the rDash brand red.
+     TODO(verify): RDPrompt's own `showIcon` artwork is in a private package. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="52" height="52" viewBox="0 0 52 52">
+    <circle cx="26" cy="26" r="26" style="opacity:.371;fill:rgba(236,34,39,.46)"/>
+    <circle cx="26" cy="26" r="20.712" style="opacity:.797;fill:rgba(236,34,39,.46)"/>
+    <circle cx="26" cy="26" r="14.999" style="fill:#ec2227"/>
+    <rect x="24.5" y="17.5" width="3" height="11" rx="1.5" style="fill:#fff"/>
+    <circle cx="26" cy="33" r="1.75" style="fill:#fff"/>
+</svg>

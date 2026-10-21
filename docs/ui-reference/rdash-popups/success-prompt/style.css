@@ -1,0 +1,71 @@
+.project-create-success-prompt-wrapper.rd-prompt .MuiDialog-paper {
+  padding: 0;
+  border-radius: 12px;
+}
+
+.project-create-success-prompt-title {
+  font-size: 20px;
+  color: #101828;
+}
+
+.project-create-success-prompt-upper-section {
+  gap: 12px;
+  padding-top: 35px;
+  padding-bottom: 20px;
+}
+
+.project-create-success-prompt-bottom-section {
+  padding: 6px 30px;
+  border-top: 1px solid #d0d5dd;
+  width: -webkit-fill-available;
+}
+
+.project-create-success-prompt-project-name-jobid {
+  width: 100%;
+  padding: 8px;
+  background-color: #f4f4f4;
+  border-radius: 6px;
+}
+
+.project-create-success-prompt-project-name {
+  font-size: 12px;
+  color: #101828;
+  max-width: 170px;
+}
+
+.project-create-success-prompt-project-jobid {
+  font-size: 10px;
+  color: #5d5d5d;
+}
+
+.project-create-success-icon {
+  width: 52px;
+}
+
+.share-project-text {
+  color: #101828;
+  font-size: 12px;
+}
+
+.project-share-button > img {
+  width: 11px;
+}
+
+.project-share-button .rd-font-gilroy-semi-bold {
+  font-size: 12px;
+}
+
+.project-create-success-prompt-project-name-jobid .rd-button-small.MuiButton-root {
+  padding: 6px 18px;
+  font-size: 12px;
+}
+
+.project-share-button.MuiButton-root {
+  border-width: 1.5px;
+}
+
+.project-share-button.MuiButton-root.Mui-disabled {
+  color: var(--theme-brand-color-primary);
+  cursor: not-allowed;
+  pointer-events: auto;
+}
